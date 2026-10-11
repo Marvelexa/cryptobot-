@@ -681,6 +681,7 @@ export class DeltaAutoTraderEngine {
     const closes15m = closedCandles15m.map(c => c.close);
     const atr15m = CryptoDedicatedStrategyEngine.calculateATR(closedCandles15m, 14);
     const rsi15mArr = CryptoDedicatedStrategyEngine.calculateRSI(closes15m, 14);
+    const confluence = CryptoDedicatedStrategyEngine.evaluateInstitutionalConfluence(closedCandles15m);
 
     const candidates: Array<{
       symbol: string;
@@ -742,123 +743,111 @@ export class DeltaAutoTraderEngine {
       isMathBlockedByStructure = true;
     }
 
-    // -------------------------------------------------------------
-    // REVERSAL AND ZIGZAG CAPTURE PLAYBOOK 2026 (signal.pdf)
-    // Blow-off Top Climax Reversals, Base Bounces, and Double Top Retests
-    // -------------------------------------------------------------
-    try {
-      const reversalSig = reversalPlaybook.evaluateSymbolReversal(cleanSym, closedCandles15m, atr15m);
-      if (reversalSig) {
-        console.log(`🎯 [REVERSAL ZIGZAG SIGNAL] ${cleanSym} Setup=${reversalSig.setupType} Side=${reversalSig.side} (Score: ${reversalSig.confidenceScore}/100, R:R: ${reversalSig.riskRewardRatio}:1, Trigger: ${reversalSig.triggerStyle})`);
-        candidates.push({
-          symbol: cleanSym,
-          timeframe: '15m',
-          strategyName: `15M Reversal & Zigzag Playbook [${reversalSig.setupType}]`,
-          side: reversalSig.side,
-          confidenceScore: reversalSig.confidenceScore,
-          atr: atr15m,
-          reason: reversalSig.reason,
-        });
+    // =============================================================
+    // STRICT INDICATOR + MATH CONFLUENCE DISPATCHER (USER MANDATE)
+    // "Delete kar do pura delete kar do. maine bola hai naaa Strict Indicator + Math Confluence kaa use kiya karo"
+    // Solo candle-only trades are COMPLETELY DELETED! A single candle shape alone NEVER trades!
+    // A trade ONLY enters when:
+    // 1. Quant Math (Fisher, SuperSmoother, Kalman, OBI, CVD) recommends a side
+    // 2. Technical Indicators (EMA Ribbon, RSI, MACD, Volume) confirm the side
+    // 3. Price Action / Candlestick patterns act purely as TIMING CONFIRMATION in the SAME direction!
+    // 4. Any conflict between Candle shape and Math/Indicators STRICTLY BLOCKS the trade!
+    // =============================================================
+    const mathSide = mathVerdict.recommendedSide;
+    const mathScore = mathVerdict.quantScore;
+
+    if (mathSide && !isMathBlockedByStructure && mathScore >= 40) {
+      // 1. Evaluate Technical Indicator Confluence (EMA 20/50/200, RSI 14, MACD, RVOL)
+      let evalResult: any = null;
+      try {
+        evalResult = strategyEngine.evaluateSymbol(symbol, closedCandles15m);
+      } catch (e) {}
+
+      const indicatorSide = evalResult?.signal;
+      const indicatorQuality = evalResult?.diagnostics?.qualityScore || confluence.confluenceScore;
+
+      const isIndicatorAligned = indicatorSide === mathSide || (
+        mathSide === 'BUY' ? (confluence.isMacroBullish || confluence.allowsLong || confluence.trendDirection === 'BULLISH' || confluence.isRsiBullish || Boolean(confluence.macd?.isBullish))
+                           : (confluence.isMacroBearish || confluence.allowsShort || confluence.trendDirection === 'BEARISH' || confluence.isRsiBearish || Boolean(confluence.macd?.isBearish))
+      );
+
+      // Severe Conflict Guard: Never trade if technical indicators strongly oppose Quant Math
+      const isIndicatorOpposing = (mathSide === 'BUY' && indicatorSide === 'SELL' && indicatorQuality >= 75) ||
+                                  (mathSide === 'SELL' && indicatorSide === 'BUY' && indicatorQuality >= 75);
+
+      if (isIndicatorOpposing) {
+        console.log(`🛡️ [CONFLUENCE GUARD] ${cleanSym} trade blocked: Technical Indicator (${indicatorSide}) strongly opposes Quant Math (${mathSide}). Solo trades deleted!`);
+        return null;
       }
-    } catch (e) {}
 
-    // 1. PRICE ACTION PLAYBOOK 2026 CANDIDATE DISPATCH (Score >= 70)
-    if (paVerdict && paVerdict.confluenceScore >= 70) {
-      const isDualAligned = mathVerdict.recommendedSide === paVerdict.side;
-      const finalScore = isDualAligned ? 99 : paVerdict.confluenceScore;
-      const strategyName = isDualAligned
-        ? `15M Playbook 2026 [${paVerdict.setupType} + Quant Math Confluence]`
-        : `15M Price Action Playbook [${paVerdict.setupType} | Score:${paVerdict.confluenceScore}]`;
+      // 2. Candlestick Anatomy & Price Action Verification
+      // Solo candle trades are DELETED. Candle shapes ONLY serve as confirmation/timing!
+      let hasCandleConfirmation = false;
+      let candleTriggerTag = '';
 
-      const reason = `Playbook 2026 PA: ${paVerdict.triggerReason} @ ${paVerdict.locationReason} | ${paVerdict.volumeReason} | Structure: ${paVerdict.marketStructure} | R:R: ${paVerdict.riskRewardRatio}${isDualAligned ? ` | [QUANT CONFLUENCE Score:${mathVerdict.quantScore}]` : ''}`;
+      if (paVerdict && paVerdict.confluenceScore >= 70) {
+        if (paVerdict.side !== mathSide) {
+          console.log(`🛡️ [CONFLUENCE CONFLICT] ${cleanSym} trade blocked: Candlestick shape (${paVerdict.side} ${paVerdict.setupType}) opposes Quant Math (${mathSide}). Single-candle solo trading is deleted!`);
+          return null; // Reject trade on conflict!
+        }
+        hasCandleConfirmation = true;
+        candleTriggerTag = ` + PA ${paVerdict.setupType}`;
+      }
 
-      console.log(`🎯 [PRICE ACTION SIGNAL] ${cleanSym} Setup=${paVerdict.setupType} Side=${paVerdict.side} (Score: ${finalScore}/100, R:R: ${paVerdict.riskRewardRatio})`);
+      // Reversal / Zigzag pattern confirmation
+      try {
+        const reversalSig = reversalPlaybook.evaluateSymbolReversal(cleanSym, closedCandles15m, atr15m);
+        if (reversalSig && reversalSig.confidenceScore >= 70) {
+          if (reversalSig.side !== mathSide) {
+            console.log(`🛡️ [CONFLUENCE CONFLICT] ${cleanSym} trade blocked: Reversal candle (${reversalSig.side} ${reversalSig.setupType}) opposes Quant Math (${mathSide}).`);
+            return null;
+          }
+          hasCandleConfirmation = true;
+          candleTriggerTag += ` + Reversal ${reversalSig.setupType}`;
+        }
+      } catch (e) {}
+
+      // Symmetric Trap Protection: Do NOT SELL into Support Floor or BUY into Resistance Ceiling
+      const isBlockedByFloor = mathSide === 'SELL' && (
+        mathVerdict.isAtSupport ||
+        mathVerdict.supportBounceConfirmed ||
+        mathVerdict.reasons.some(r => r.includes('Support') || r.includes('FLOOR BOUNCE'))
+      );
+      const isBlockedByCeiling = mathSide === 'BUY' && (
+        mathVerdict.isAtResistance ||
+        mathVerdict.resistanceRejectConfirmed ||
+        mathVerdict.reasons.some(r => r.includes('Resistance') || r.includes('CEILING REJECT'))
+      );
+
+      if (isBlockedByFloor) {
+        console.log(`🛡️ [TRAP SHIELD] ${cleanSym} SELL dropped: Price is testing/bouncing at Support Floor ($${mathVerdict.nearestSupport || 'Support'}).`);
+        return null;
+      }
+      if (isBlockedByCeiling) {
+        console.log(`🛡️ [TRAP SHIELD] ${cleanSym} BUY dropped: Price is testing/rejecting at Resistance Ceiling ($${mathVerdict.nearestResistance || 'Resistance'}).`);
+        return null;
+      }
+
+      // 3. Synthesize Multi-Layer Strict Confluence Score
+      let strictScore = mathScore;
+      if (isIndicatorAligned) strictScore += 25;
+      if (hasCandleConfirmation) strictScore += 25;
+      strictScore = Math.min(99, Math.max(strictScore, mathScore));
+
+      const mathConfluenceNote = `Strict Math & Indicator Confluence (${mathVerdict.marketRegime} | Score ${strictScore}/100): Fisher=${mathVerdict.fisherTransform}, Hurst=${mathVerdict.hurstExponent}, SS_Slope=${mathVerdict.superSmootherSlope}%, KalmanDev=${mathVerdict.kalmanDeviationPct}%${microData ? ` | OBI=${microData.obi}, CVD=${microData.cvd}` : ''} | Indicators: ${confluence.summaryReason}${candleTriggerTag} | Reasons: ${mathVerdict.reasons.join(' + ')}`;
+
+      console.log(`🧮 [STRICT CONFLUENCE VERIFIED] ${cleanSym} Direction=${mathSide} (Score: ${strictScore}/100 | Math: ${mathScore}/100 | Indicators: ${isIndicatorAligned ? 'ALIGNED' : 'NEUTRAL'}${candleTriggerTag})`);
+
       candidates.push({
         symbol: cleanSym,
         timeframe: '15m',
-        strategyName,
-        side: paVerdict.side,
-        confidenceScore: finalScore,
+        strategyName: `15M Strict Math & Indicator Confluence [${mathVerdict.marketRegime} | Score:${strictScore}]${candleTriggerTag}`,
+        side: mathSide,
+        confidenceScore: strictScore,
         atr: atr15m,
-        reason,
+        reason: mathConfluenceNote,
       });
     }
-
-    // 2. PRIMARY STRATEGY: Institutional Quantitative Mathematical Engine (v2)
-    // One vote per group, max 100 clean score, execution threshold >= 70
-    if (mathVerdict.recommendedSide && !isMathBlockedByStructure) {
-      const existingCandidate = candidates.find(c => c.symbol === cleanSym && c.side === mathVerdict.recommendedSide);
-      if (existingCandidate) {
-        existingCandidate.confidenceScore = 99;
-      } else {
-        const rawMathSide = mathVerdict.recommendedSide;
-        const targetExecutedSide: 'BUY' | 'SELL' = rawMathSide;
-        if (targetExecutedSide !== rawMathSide) {
-          console.error(`❌ [INTEGRITY GUARD] Quant Math signal flip blocked: targetExecutedSide=${targetExecutedSide} !== rawMathSide=${rawMathSide}`);
-          return null;
-        }
-
-        const mathConfluenceNote = `Playbook 2026 Confluence (${mathVerdict.marketRegime} | Score ${mathVerdict.quantScore}/100): Fisher=${mathVerdict.fisherTransform}, Hurst=${mathVerdict.hurstExponent}, SS_Slope=${mathVerdict.superSmootherSlope}%, KalmanDev=${mathVerdict.kalmanDeviationPct}%${microData ? ` | OBI=${microData.obi}, CVD=${microData.cvd}` : ''} | Reasons: ${mathVerdict.reasons.join(' + ')}`;
-
-        console.log(`🧮 [QUANT MATH SIGNAL] ${cleanSym} MathRecommendation=${rawMathSide} (Score: ${mathVerdict.quantScore}/100) ➔ ExecutedSide=${targetExecutedSide}`);
-        candidates.push({
-          symbol: cleanSym,
-          timeframe: '15m',
-          strategyName: `15M Playbook 2026 Engine [${mathVerdict.marketRegime} | Score:${mathVerdict.quantScore}]`,
-          side: rawMathSide,
-          confidenceScore: mathVerdict.quantScore,
-          atr: atr15m,
-          reason: mathConfluenceNote,
-        });
-      }
-    }
-
-    // -------------------------------------------------------------
-    // DUAL-ENGINE HARMONY: Math Engine + Technical Indicator Sniper
-    // User Mandate: "indicator both math dono rakho"
-    // -------------------------------------------------------------
-    try {
-      const evalResult = strategyEngine.evaluateSymbol(symbol, closedCandles15m);
-      if (evalResult && evalResult.signal) {
-        const matchingCand = candidates.find(c => c.side === evalResult.signal);
-        if (matchingCand) {
-          matchingCand.confidenceScore = 99;
-          matchingCand.strategyName += ` + ${evalResult.strategyName}`;
-          matchingCand.reason += ` | [DUAL CONFLUENCE: TOKEN SNIPER ALIGNED 100%]`;
-        } else {
-          // Symmetric Trap Protection: Do NOT SELL into Support Floor or BUY into Resistance Ceiling
-          const isBlockedByFloor = evalResult.signal === 'SELL' && (
-            mathVerdict.isAtSupport ||
-            mathVerdict.supportBounceConfirmed ||
-            mathVerdict.reasons.some(r => r.includes('Support') || r.includes('FLOOR BOUNCE'))
-          );
-          const isBlockedByCeiling = evalResult.signal === 'BUY' && (
-            mathVerdict.isAtResistance ||
-            mathVerdict.resistanceRejectConfirmed ||
-            mathVerdict.reasons.some(r => r.includes('Resistance') || r.includes('CEILING REJECT'))
-          );
-
-          if (isBlockedByFloor) {
-            console.log(`🛡️ [TRAP SHIELD] ${cleanSym} Indicator SELL dropped: Price is testing/bouncing at Support Floor ($${mathVerdict.nearestSupport || 'Support'}).`);
-          } else if (isBlockedByCeiling) {
-            console.log(`🛡️ [TRAP SHIELD] ${cleanSym} Indicator BUY dropped: Price is testing/rejecting at Resistance Ceiling ($${mathVerdict.nearestResistance || 'Resistance'}).`);
-          } else {
-            const quality = evalResult.diagnostics?.qualityScore;
-            if (quality === undefined || quality >= 70) {
-              candidates.push({
-                symbol: cleanSym,
-                timeframe: '15m',
-                strategyName: `15M Dedicated Indicator [${evalResult.strategyName}]`,
-                side: evalResult.signal,
-                confidenceScore: evalResult.diagnostics?.qualityScore || 80,
-                atr: atr15m,
-                reason: evalResult.reason,
-              });
-            }
-          }
-        }
-      }
-    } catch (e) {}
 
     // -------------------------------------------------------------
     // TERTIARY STRATEGY: 15M Multi-Candle RSI Divergence
@@ -901,16 +890,19 @@ export class DeltaAutoTraderEngine {
     try {
       const compression = timingEngine.checkCompressionBreakout(closedCandles15m);
       if (compression.isBreakout && compression.breakoutSide) {
-        console.log(`🚀 [COMPRESSION BREAKOUT] ${cleanSym} Early Bar 1 Breakout (${compression.breakoutSide}): RVOL=${compression.rvol}, Bandwidth=${(compression.bandwidthPct * 100).toFixed(1)}%`);
-        candidates.push({
-          symbol: cleanSym,
-          timeframe: '15m',
-          strategyName: `15M Compression Breakout [Early Phase | RVOL:${compression.rvol}]`,
-          side: compression.breakoutSide,
-          confidenceScore: 92,
-          atr: atr15m,
-          reason: compression.reason,
-        });
+        const isOpposingMath = mathVerdict.recommendedSide && mathVerdict.recommendedSide !== compression.breakoutSide;
+        if (!isOpposingMath && !isMathBlockedByStructure) {
+          console.log(`🚀 [COMPRESSION BREAKOUT] ${cleanSym} Early Bar 1 Breakout (${compression.breakoutSide}): RVOL=${compression.rvol}, Bandwidth=${(compression.bandwidthPct * 100).toFixed(1)}%`);
+          candidates.push({
+            symbol: cleanSym,
+            timeframe: '15m',
+            strategyName: `15M Compression Breakout [Early Phase | RVOL:${compression.rvol}]`,
+            side: compression.breakoutSide,
+            confidenceScore: 92,
+            atr: atr15m,
+            reason: compression.reason,
+          });
+        }
       }
     } catch (e) {}
 
@@ -923,6 +915,7 @@ export class DeltaAutoTraderEngine {
     if (isSevereChop) {
       const chopBypassCandidates = candidates.filter(cand => {
         const isBypass = cand.confidenceScore >= 80 && (
+          cand.strategyName.includes('Strict Math & Indicator Confluence') ||
           cand.strategyName.includes('Dedicated Indicator') ||
           cand.strategyName.includes('BREAKOUT') ||
           cand.strategyName.includes('TREND_PULLBACK') ||
@@ -1521,8 +1514,8 @@ export class DeltaAutoTraderEngine {
             return false;
           }
           // Playbook 2026 Unified Quality Gate:
-          // Quant Math executes at >= 40 (calibrated threshold), while technical price action / dedicated indicators require >= 70:
-          const minRequiredScore = (c.multiSignal.strategyName.includes('Playbook 2026 Engine') || c.multiSignal.strategyName.includes('Quant Math')) ? 40 : 70;
+          // Quant Math & Strict Confluence executes at >= 40 (calibrated threshold), while standalone technical patterns require >= 70:
+          const minRequiredScore = (c.multiSignal.strategyName.includes('Playbook 2026 Engine') || c.multiSignal.strategyName.includes('Quant Math') || c.multiSignal.strategyName.includes('Strict Math & Indicator Confluence')) ? 40 : 70;
           if (c.multiSignal.confidenceScore < minRequiredScore) {
             console.log(`🛡️ [QUALITY SHIELD] ${c.cleanDeltaSym} ${c.executedSide} filtered out (Score: ${c.multiSignal.confidenceScore} < ${minRequiredScore}). Waiting for high-conviction setup.`);
             return false;
