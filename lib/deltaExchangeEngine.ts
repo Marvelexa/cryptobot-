@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { KlinePoint } from '../src/types';
 
 export interface DeltaExchangeConfig {
   apiKey?: string;
@@ -63,8 +64,8 @@ export class DeltaExchangeEngine {
       : 'wss://socket.india.delta.exchange';
 
     this.config = {
-      apiKey: process.env.DELTA_API_KEY || process.env.DELTA_EXCHANGE_API_KEY || config?.apiKey || 'cUNVS6V7vKEt7BUnAQgpeSrbJnypKk',
-      apiSecret: process.env.DELTA_API_SECRET || process.env.DELTA_EXCHANGE_API_SECRET || config?.apiSecret || 'lHXN60lUwNl8eQTEACGdTkBkuJMSXrlih3LiAP7SFL2MQFkbfeGueKQm3fMe',
+      apiKey: process.env.DELTA_API_KEY || process.env.DELTA_EXCHANGE_API_KEY || config?.apiKey || '',
+      apiSecret: process.env.DELTA_API_SECRET || process.env.DELTA_EXCHANGE_API_SECRET || config?.apiSecret || '',
       baseUrl: config?.baseUrl || process.env.DELTA_BASE_URL || defaultBaseUrl,
       wsUrl: config?.wsUrl || process.env.DELTA_WS_URL || defaultWsUrl,
       isTestnet,
@@ -520,6 +521,48 @@ export class DeltaExchangeEngine {
     } catch (e) {
       return null;
     }
+  }
+
+  /**
+   * Fetches genuine historical OHLCV candles from Delta Exchange (solutions.pdf Issues 6 & 11)
+   */
+  public async getKlines(symbol: string, resolution: string = '15m', limit: number = 250): Promise<KlinePoint[]> {
+    const deltaSymbol = toDeltaSymbol(symbol);
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      let stepSec = 15 * 60;
+      if (resolution === '1m') stepSec = 60;
+      else if (resolution === '3m') stepSec = 3 * 60;
+      else if (resolution === '5m') stepSec = 5 * 60;
+      else if (resolution === '30m') stepSec = 30 * 60;
+      else if (resolution === '1h') stepSec = 60 * 60;
+      else if (resolution === '4h') stepSec = 4 * 60 * 60;
+      else if (resolution === '1d') stepSec = 24 * 60 * 60;
+
+      const startSec = nowSec - (limit * stepSec);
+      const res = await this.request('GET', '/v2/chart/history', {
+        symbol: deltaSymbol,
+        resolution,
+        start: startSec.toString(),
+        end: nowSec.toString(),
+      });
+
+      const list = res?.result || [];
+      if (Array.isArray(list) && list.length > 0) {
+        const sorted = [...list].sort((a, b) => a.time - b.time);
+        return sorted.map((k: any) => ({
+          time: k.time > 10000000000 ? k.time : k.time * 1000,
+          open: parseFloat(k.open),
+          high: parseFloat(k.high),
+          low: parseFloat(k.low),
+          close: parseFloat(k.close),
+          volume: parseFloat(k.volume || '0'),
+        }));
+      }
+    } catch (e: any) {
+      // Quiet fallback
+    }
+    return [];
   }
 
   /**

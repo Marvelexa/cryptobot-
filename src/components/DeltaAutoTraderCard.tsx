@@ -116,27 +116,6 @@ export const DeltaAutoTraderCard: React.FC<DeltaAutoTraderCardProps> = ({ onSele
     }
   };
 
-  const [togglingInverse, setTogglingInverse] = useState(false);
-  const handleToggleInverse = async () => {
-    setTogglingInverse(true);
-    const nextInverse = !status?.isInverseTrading;
-    setStatus(prev => prev ? { ...prev, isInverseTrading: nextInverse } : null);
-    try {
-      const res = await fetch('/api/autotrader/toggle-inverse', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isInverseTrading: nextInverse }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setStatus(prev => prev ? { ...prev, isInverseTrading: data.isInverseTrading } : null);
-      }
-    } catch (e) {
-      console.error('Failed to toggle inverse trading:', e);
-    } finally {
-      setTogglingInverse(false);
-    }
-  };
 
   
     const handleClosePosition = async (positionId: string, symbol: string) => {
@@ -458,23 +437,15 @@ export const DeltaAutoTraderCard: React.FC<DeltaAutoTraderCardProps> = ({ onSele
           </div>
 
           
-          {/* Reversal Mode Toggle Button */}
-          <button
-            id="btn-toggle-reversal-mode"
-            onClick={handleToggleInverse}
-            disabled={togglingInverse}
-            className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all shadow-md cursor-pointer ${
-              status?.isInverseTrading
-                ? 'bg-gradient-to-r from-purple-700 to-indigo-700 hover:from-purple-600 hover:to-indigo-600 text-white shadow-purple-900/40 border border-purple-400'
-                : 'bg-slate-800/90 hover:bg-slate-700 text-slate-300 border border-slate-700'
-            } ${togglingInverse ? 'opacity-80 cursor-wait' : ''}`}
-            title="Inverse Only Mode: When ON, strictly executes INVERSE trades (Fading pumps with SHORT, fading dumps with LONG). Direct mode is disabled."
+          {/* Direct Mode Indicator Badge (solutions.pdf Issue 3) */}
+          <div
+            id="badge-direct-mode"
+            className="px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 shadow-md bg-emerald-950/60 text-emerald-300 border border-emerald-700/60"
+            title="Direct Mode: Signals execute strictly in their original direction without inverse flipping."
           >
-            <Sparkles className={`w-3.5 h-3.5 ${status?.isInverseTrading ? 'text-amber-300 animate-pulse' : 'text-slate-400'}`} />
-            <span>
-              {status?.isInverseTrading ? '🔄 INVERSE ONLY MODE: ON' : '🔄 INVERSE ONLY MODE: OFF'}
-            </span>
-          </button>
+            <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+            <span>🎯 DIRECT TREND MODE</span>
+          </div>
 
           {/* Start/Pause Button */}
           <button

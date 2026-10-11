@@ -44,34 +44,6 @@ export const CandlestickPatternPnLTerminal: React.FC<CandlestickPatternPnLTermin
   const [pineScriptCode, setPineScriptCode] = useState<string>('');
   const [selectedPhotoFilter, setSelectedPhotoFilter] = useState<number | 'ALL'>('ALL');
   const [triggeringSymbol, setTriggeringSymbol] = useState<string | null>(null);
-  const [isInverseTrading, setIsInverseTrading] = useState<boolean>(status?.isInverseTrading ?? false);
-  const [isTogglingInverse, setIsTogglingInverse] = useState<boolean>(false);
-
-  useEffect(() => {
-    if (status?.isInverseTrading !== undefined) {
-      setIsInverseTrading(status.isInverseTrading);
-    }
-  }, [status?.isInverseTrading]);
-
-  const handleToggleInverse = async () => {
-    setIsTogglingInverse(true);
-    try {
-      const nextState = !isInverseTrading;
-      const res = await fetch('/api/autotrader/toggle-inverse', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isInverseTrading: nextState }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setIsInverseTrading(data.isInverseTrading);
-      }
-    } catch (e) {
-      console.error('Failed to toggle inverse trading:', e);
-    } finally {
-      setIsTogglingInverse(false);
-    }
-  };
 
   const [isResettingPnl, setIsResettingPnl] = useState<boolean>(false);
   const handleResetPnlAndHistory = async () => {
@@ -236,23 +208,15 @@ export const CandlestickPatternPnLTerminal: React.FC<CandlestickPatternPnLTermin
 
           {/* Action Buttons Toolbar: Reversal Toggle + Pine Script Exporter */}
           <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
-            {/* Reversal Mode Toggle Button */}
-            <button
-              id="btn-terminal-toggle-reversal"
-              onClick={handleToggleInverse}
-              disabled={isTogglingInverse}
-              className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all shadow-md cursor-pointer ${
-                isInverseTrading
-                  ? 'bg-gradient-to-r from-purple-700 to-indigo-700 hover:from-purple-600 hover:to-indigo-600 text-white shadow-purple-900/40 border border-purple-400'
-                  : 'bg-slate-800/90 hover:bg-slate-700 text-slate-300 border border-slate-700'
-              } ${isTogglingInverse ? 'opacity-80 cursor-wait' : ''}`}
-              title="Toggle Reversal Mode: When ON, strictly executes REVERSAL trades (Fading pumps with SHORT, fading dumps with LONG)"
+            {/* Direct Trend Mode Indicator Badge (solutions.pdf Issue 3) */}
+            <div
+              id="badge-terminal-direct-mode"
+              className="px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 shadow-md bg-emerald-950/60 text-emerald-300 border border-emerald-700/60"
+              title="Direct Trend Mode: Signals execute strictly in their original direction without inverse flipping."
             >
-              <Sparkles className={`w-3.5 h-3.5 ${isInverseTrading ? 'text-amber-300 animate-pulse' : 'text-slate-400'}`} />
-              <span>
-                {isInverseTrading ? '🔄 REVERSAL MODE: ON (STRICT)' : '➡️ DIRECT TREND MODE'}
-              </span>
-            </button>
+              <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+              <span>🎯 DIRECT TREND MODE</span>
+            </div>
 
             {/* Quick Pine Script Exporter Button */}
             <button

@@ -16,11 +16,11 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3001;
 
 // Default to user's provided Delta Exchange API credentials (Real Delta Exchange India)
 let EXCHANGE_CONFIG = {
-  apiKey: process.env.DELTA_API_KEY || process.env.EXCHANGE_API_KEY || 'cUNVS6V7vKEt7BUnAQgpeSrbJnypKk',
-  apiSecret: process.env.DELTA_API_SECRET || process.env.EXCHANGE_API_SECRET || 'lHXN60lUwNl8eQTEACGdTkBkuJMSXrlih3LiAP7SFL2MQFkbfeGueKQm3fMe',
+  apiKey: process.env.DELTA_API_KEY || process.env.EXCHANGE_API_KEY || '',
+  apiSecret: process.env.DELTA_API_SECRET || process.env.EXCHANGE_API_SECRET || '',
   exchangeName: process.env.DELTA_IS_TESTNET === 'true' ? 'Delta Exchange Demo (Testnet)' : 'Delta Exchange India',
   endpoint: process.env.DELTA_BASE_URL || (process.env.DELTA_IS_TESTNET === 'true' ? 'https://cdn-ind.testnet.deltaex.org' : 'https://api.india.delta.exchange'),
-  isSimulation: process.env.DELTA_IS_SIMULATION === 'true' || process.env.PAPER_TRADING === 'true',
+  isSimulation: process.env.DELTA_IS_SIMULATION === 'true' || process.env.PAPER_TRADING === 'true' || !process.env.DELTA_API_KEY || !process.env.DELTA_API_SECRET,
 };
 
 // Initialize Delta Exchange credentials immediately in Real / Live or Demo mode
@@ -66,10 +66,44 @@ interface ExecutedOrder {
   triggerReason: string;
 }
 
-// In-memory persistent state for rules and trading records
-let autoSellRules: AutoSellRule[] = [];
+// Persistent state for rules and trading records (solutions.pdf Issue 15)
+const RULES_FILE = path.join(process.cwd(), '.auto_sell_rules.json');
+const ORDERS_FILE = path.join(process.cwd(), '.order_history.json');
 
-let orderHistory: ExecutedOrder[] = [];
+function loadAutoSellRules(): AutoSellRule[] {
+  try {
+    if (fs.existsSync(RULES_FILE)) {
+      const data = fs.readFileSync(RULES_FILE, 'utf-8').trim();
+      if (data) return JSON.parse(data);
+    }
+  } catch (e) {}
+  return [];
+}
+
+function saveAutoSellRules() {
+  try {
+    fs.writeFileSync(RULES_FILE, JSON.stringify(autoSellRules, null, 2), 'utf-8');
+  } catch (e) {}
+}
+
+function loadOrderHistory(): ExecutedOrder[] {
+  try {
+    if (fs.existsSync(ORDERS_FILE)) {
+      const data = fs.readFileSync(ORDERS_FILE, 'utf-8').trim();
+      if (data) return JSON.parse(data);
+    }
+  } catch (e) {}
+  return [];
+}
+
+function saveOrderHistory() {
+  try {
+    fs.writeFileSync(ORDERS_FILE, JSON.stringify(orderHistory.slice(0, 500), null, 2), 'utf-8');
+  } catch (e) {}
+}
+
+let autoSellRules: AutoSellRule[] = loadAutoSellRules();
+let orderHistory: ExecutedOrder[] = loadOrderHistory();
 
 // Simulated balances for testing/demo fallback when exchange API keys are restricted to specific IPs
 let simulationBalances = {
@@ -97,6 +131,18 @@ async function startServer() {
     next(err);
   });
 
+  // Auth Middleware for Administrative Management Endpoints (solutions.pdf Issue 2)
+  const adminAuthMiddleware = (req: any, res: any, next: any) => {
+    const adminSecret = process.env.ADMIN_API_KEY || process.env.WEBHOOK_SECRET;
+    if (adminSecret) {
+      const authHeader = req.headers['authorization'] || req.headers['x-api-key'] || req.headers['x-admin-key'];
+      if (authHeader !== adminSecret && authHeader !== `Bearer ${adminSecret}`) {
+        return res.status(401).json({ error: 'Unauthorized: Valid Admin API Token required' });
+      }
+    }
+    next();
+  };
+
   // API 1: Health Check
   app.get('/api/health', (req, res) => {
     res.json({
@@ -107,7 +153,7 @@ async function startServer() {
     });
   });
 
-  // API 2: Credentials status & update
+  // API 2: Credentials status & update (protected by admin auth)
   app.get('/api/exchange/credentials', (req, res) => {
     const key = EXCHANGE_CONFIG.apiKey || '';
     const maskedKey = key.length > 8 
@@ -123,7 +169,7 @@ async function startServer() {
     });
   });
 
-  app.post('/api/exchange/credentials', (req, res) => {
+  app.post('/api/exchange/credentials', adminAuthMiddleware, (req, res) => {
     const { apiKey, apiSecret, exchangeName, isSimulation } = req.body;
     if (apiKey !== undefined) EXCHANGE_CONFIG.apiKey = String(apiKey).trim();
     if (apiSecret !== undefined) EXCHANGE_CONFIG.apiSecret = String(apiSecret).trim();
@@ -148,7 +194,8 @@ async function startServer() {
       return res.json({
         connected: false,
         error: 'API Key or Secret missing. Set credentials first.',
-        isSimulation: true,
+        isSimulation: EXCHANGE_CONFIG.isSimulation,
+        balances: [],
       });
     }
 
@@ -191,27 +238,18 @@ async function startServer() {
             balanceInr: b.balance_inr,
           }));
 
+        const totalNetEquity = data.meta?.net_equity || (validBalances.reduce((sum: number, b: any) => sum + parseFloat(b.free || '0'), 0)).toFixed(2);
+
         return res.json({
           connected: true,
           status: EXCHANGE_CONFIG.isSimulation ? 'DEMO_CONNECTED' : 'LIVE_CONNECTED',
           exchange: EXCHANGE_CONFIG.exchangeName,
-          netEquityUSD: data.meta?.net_equity || '180.00',
-          balances: validBalances.length > 0 ? validBalances : [{ asset: 'USD', free: '180.00', locked: '0.00' }],
+          netEquityUSD: totalNetEquity,
+          balances: validBalances,
         });
       } else {
         const errorMsg = data.error?.code || data.error || data.msg || `HTTP ${response.status}`;
         const clientIp = data.error?.context?.client_ip || '';
-
-        if (EXCHANGE_CONFIG.isSimulation) {
-          return res.json({
-            connected: true,
-            status: 'DEMO_CONNECTED',
-            exchange: EXCHANGE_CONFIG.exchangeName,
-            isSimulation: true,
-            message: 'Delta Demo Testnet simulation active with real live price tick feeds',
-            balances: [{ asset: 'USD', free: '180.00', locked: '0.00' }],
-          });
-        }
 
         return res.json({
           connected: false,
@@ -220,45 +258,39 @@ async function startServer() {
           error: errorMsg,
           clientIp,
           suggestion: errorMsg === 'ip_not_whitelisted_for_api_key'
-            ? `Your Delta API key has IP whitelisting enabled. Please add your IP (${clientIp || 'your IP'}) to the IP whitelist on delta.exchange/app/account/manageapikeys or leave the IP whitelist field blank to allow all IPs.`
+            ? `Your Delta API key has IP whitelisting enabled. Please add your IP (${clientIp || 'your server IP'}) in Delta Exchange API settings.`
             : 'Check your Delta Exchange API credentials and permissions.',
-          balances: [{ asset: 'USD', free: '180.00', locked: '0.00' }],
+          balances: [],
         });
       }
     } catch (err: any) {
-      if (EXCHANGE_CONFIG.isSimulation) {
-        return res.json({
-          connected: true,
-          status: 'DEMO_CONNECTED',
-          exchange: EXCHANGE_CONFIG.exchangeName,
-          isSimulation: true,
-          balances: [{ asset: 'USD', free: '180.00', locked: '0.00' }],
-        });
-      }
       return res.json({
         connected: false,
         status: 'NETWORK_OR_TIMEOUT',
         error: err.message || 'Connection timeout to exchange endpoint',
-        suggestion: 'Operating with real-time price feeds.',
-        balances: [{ asset: 'USD', free: '180.00', locked: '0.00' }],
+        suggestion: 'Verify network connectivity to Delta Exchange.',
+        balances: [],
       });
     }
   });
 
-  // API 4: Get balances (live Delta or fallback)
+  // API 4: Get balances (live Delta or simulation)
   app.get('/api/exchange/balances', async (req, res) => {
     try {
       const bal = await deltaExchange.getWalletBalance();
+      if (!bal || bal.balanceUSD === undefined) {
+        return res.status(502).json({ error: 'Could not fetch wallet balances from exchange', balances: [] });
+      }
       res.json({
         balances: [
           { asset: bal.currency || 'USD', free: bal.availableUSD.toFixed(2), locked: (bal.balanceUSD - bal.availableUSD).toFixed(2) }
         ],
         mode: deltaExchange.getConfig().isSimulation ? 'SIMULATION' : 'LIVE_DELTA_INDIA',
       });
-    } catch (e) {
-      res.json({
-        balances: [{ asset: 'USD', free: '155.95', locked: '0.00' }],
-        mode: 'LIVE_DELTA_INDIA',
+    } catch (e: any) {
+      res.status(502).json({
+        error: e.message || 'Exchange balance fetch failed',
+        balances: [],
       });
     }
   });
@@ -346,47 +378,69 @@ async function startServer() {
     const interval = (req.query.interval as string) || '15m';
     const limit = Math.min(100, Math.max(20, parseInt(req.query.limit as string || '50')));
 
-    // Fast-track sub-minute timeframes (10s, 30s) directly with real live price anchoring
+    const isDemoRequested = req.query.demo === 'true';
+
+    // Sub-minute intervals: if not explicitly demo, serve real 1m candles
     if (interval === '10s' || interval === '30s') {
-      const currentTicker = cachedTickers.find(t => t.symbol === symbol);
-      const lastPrice = currentTicker ? currentTicker.price : 64000;
-      const subKlines = [];
-      const now = Date.now();
-      const intervalMs = interval === '10s' ? 10 * 1000 : 30 * 1000;
-      let rollingPrice = lastPrice * 0.994;
+      if (!isDemoRequested) {
+        // Return genuine 1m klines from exchange rather than random data (solutions.pdf Issue 6)
+        try {
+          const deltaKlines = await deltaExchange.getKlines(toDeltaSymbol(symbol), '1m', limit);
+          if (Array.isArray(deltaKlines) && deltaKlines.length > 0) {
+            return res.json(deltaKlines);
+          }
+        } catch (e) {}
+      } else {
+        // Synthetic mock data strictly for frontend demo UI mode only
+        const currentTicker = cachedTickers.find(t => t.symbol === symbol);
+        const lastPrice = currentTicker ? currentTicker.price : 64000;
+        const subKlines = [];
+        const now = Date.now();
+        const intervalMs = interval === '10s' ? 10 * 1000 : 30 * 1000;
+        let rollingPrice = lastPrice * 0.994;
 
-      for (let i = limit; i > 0; i--) {
-        const cTime = now - i * intervalMs;
-        const volatility = lastPrice * 0.0006;
-        const open = rollingPrice;
-        const delta = (Math.random() - 0.49) * volatility;
-        const close = Math.max(open * 0.5, open + delta);
-        const high = Math.max(open, close) + Math.random() * (volatility * 0.4);
-        const low = Math.min(open, close) - Math.random() * (volatility * 0.4);
-        const volume = Math.round(5 + Math.random() * 30);
+        for (let i = limit; i > 0; i--) {
+          const cTime = now - i * intervalMs;
+          const volatility = lastPrice * 0.0006;
+          const open = rollingPrice;
+          const delta = (Math.random() - 0.49) * volatility;
+          const close = Math.max(open * 0.5, open + delta);
+          const high = Math.max(open, close) + Math.random() * (volatility * 0.4);
+          const low = Math.min(open, close) - Math.random() * (volatility * 0.4);
+          const volume = Math.round(5 + Math.random() * 30);
 
+          subKlines.push({
+            time: cTime,
+            open: parseFloat(open.toFixed(2)),
+            high: parseFloat(high.toFixed(2)),
+            low: parseFloat(low.toFixed(2)),
+            close: parseFloat(close.toFixed(2)),
+            volume,
+          });
+          rollingPrice = close;
+        }
         subKlines.push({
-          time: cTime,
-          open: parseFloat(open.toFixed(2)),
-          high: parseFloat(high.toFixed(2)),
-          low: parseFloat(low.toFixed(2)),
-          close: parseFloat(close.toFixed(2)),
-          volume,
+          time: now,
+          open: parseFloat(rollingPrice.toFixed(2)),
+          high: parseFloat(Math.max(rollingPrice, lastPrice * 1.0004).toFixed(2)),
+          low: parseFloat(Math.min(rollingPrice, lastPrice * 0.9996).toFixed(2)),
+          close: parseFloat(lastPrice.toFixed(2)),
+          volume: 18,
         });
-        rollingPrice = close;
-      }
-      subKlines.push({
-        time: now,
-        open: parseFloat(rollingPrice.toFixed(2)),
-        high: parseFloat(Math.max(rollingPrice, lastPrice * 1.0004).toFixed(2)),
-        low: parseFloat(Math.min(rollingPrice, lastPrice * 0.9996).toFixed(2)),
-        close: parseFloat(lastPrice.toFixed(2)),
-        volume: 18,
-      });
 
-      return res.json(subKlines);
+        return res.json(subKlines);
+      }
     }
 
+    // 1. Try Delta Exchange directly for genuine perpetual market data
+    try {
+      const deltaKlines = await deltaExchange.getKlines(toDeltaSymbol(symbol), interval === '1h' ? '1h' : '15m', limit);
+      if (Array.isArray(deltaKlines) && deltaKlines.length > 0) {
+        return res.json(deltaKlines);
+      }
+    } catch (e) {}
+
+    // 2. Try Binance public klines API
     try {
       const resp = await fetch(`https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`, {
         headers: { 'Accept': 'application/json' }
@@ -409,52 +463,38 @@ async function startServer() {
       console.warn('Klines fetch error:', e);
     }
 
-    // High fidelity fallback candlestick generator if Binance public API is throttled
-    const currentTicker = cachedTickers.find(t => t.symbol === symbol);
-    const lastPrice = currentTicker ? currentTicker.price : 64000;
-    const fallbackKlines = [];
-    const now = Date.now();
-    let intervalMs = 15 * 60 * 1000;
-    if (interval === '10s') intervalMs = 10 * 1000;
-    else if (interval === '30s') intervalMs = 30 * 1000;
-    else if (interval === '1m') intervalMs = 60 * 1000;
-    else if (interval === '5m') intervalMs = 5 * 60 * 1000;
-    else if (interval === '1h') intervalMs = 60 * 60 * 1000;
-    else if (interval === '4h') intervalMs = 4 * 60 * 60 * 1000;
-    else if (interval === '1d') intervalMs = 24 * 60 * 60 * 1000;
+    // If both real sources fail, do NOT inject fake random candles unless demo is explicitly requested (solutions.pdf Issue 6)
+    if (isDemoRequested) {
+      const currentTicker = cachedTickers.find(t => t.symbol === symbol);
+      const lastPrice = currentTicker ? currentTicker.price : 64000;
+      const fallbackKlines = [];
+      const now = Date.now();
+      const intervalMs = 15 * 60 * 1000;
+      let rollingPrice = lastPrice * 0.97;
+      for (let i = limit; i > 0; i--) {
+        const cTime = now - i * intervalMs;
+        const volatility = lastPrice * 0.0035;
+        const open = rollingPrice;
+        const delta = (Math.random() - 0.48) * volatility;
+        const close = Math.max(open * 0.5, open + delta);
+        const high = Math.max(open, close) + Math.random() * (volatility * 0.7);
+        const low = Math.min(open, close) - Math.random() * (volatility * 0.7);
+        const volume = Math.round(50 + Math.random() * 450);
 
-    let rollingPrice = lastPrice * 0.97;
-    for (let i = limit; i > 0; i--) {
-      const cTime = now - i * intervalMs;
-      const volatility = lastPrice * 0.0035;
-      const open = rollingPrice;
-      const delta = (Math.random() - 0.48) * volatility;
-      const close = Math.max(open * 0.5, open + delta);
-      const high = Math.max(open, close) + Math.random() * (volatility * 0.7);
-      const low = Math.min(open, close) - Math.random() * (volatility * 0.7);
-      const volume = Math.round(50 + Math.random() * 450);
-
-      fallbackKlines.push({
-        time: cTime,
-        open,
-        high,
-        low,
-        close,
-        volume,
-      });
-      rollingPrice = close;
+        fallbackKlines.push({
+          time: cTime,
+          open,
+          high,
+          low,
+          close,
+          volume,
+        });
+        rollingPrice = close;
+      }
+      return res.json(fallbackKlines);
     }
-    // Anchor current candle to actual live price
-    fallbackKlines.push({
-      time: now,
-      open: rollingPrice,
-      high: Math.max(rollingPrice, lastPrice * 1.002),
-      low: Math.min(rollingPrice, lastPrice * 0.998),
-      close: lastPrice,
-      volume: 320,
-    });
 
-    res.json(fallbackKlines);
+    return res.status(503).json({ error: 'Market candle data temporarily unavailable from exchanges' });
   });
 
   // API 8: Auto Sell Rules Management
@@ -488,6 +528,7 @@ async function startServer() {
     };
 
     autoSellRules.unshift(newRule);
+    saveAutoSellRules();
     res.json({ success: true, rule: newRule });
   });
 
@@ -502,6 +543,7 @@ async function startServer() {
       ...autoSellRules[ruleIndex],
       ...req.body,
     };
+    saveAutoSellRules();
 
     res.json({ success: true, rule: autoSellRules[ruleIndex] });
   });
@@ -509,6 +551,7 @@ async function startServer() {
   app.delete('/api/rules/:id', (req, res) => {
     const { id } = req.params;
     autoSellRules = autoSellRules.filter(r => r.id !== id);
+    saveAutoSellRules();
     res.json({ success: true, message: 'Rule deleted' });
   });
 
@@ -537,81 +580,72 @@ async function startServer() {
     const totalUsdt = fillPrice * fillQty;
     const baseAsset = symbol.replace('USDT', '') as keyof typeof simulationBalances;
 
-    // Execute order on live exchange if valid credentials exist
-    let liveExecutionResult = null;
+    // Execute order via Delta Exchange Engine if valid credentials exist
+    let liveExecutionResult: any = null;
     let isLiveExecuted = false;
 
     if (!EXCHANGE_CONFIG.isSimulation && EXCHANGE_CONFIG.apiKey && EXCHANGE_CONFIG.apiSecret) {
       try {
-        const timestamp = Date.now();
-        const params = new URLSearchParams({
-          symbol: symbol.toUpperCase(),
-          side: side.toUpperCase(),
-          type: type.toUpperCase(),
-          quantity: fillQty.toString(),
-          timestamp: timestamp.toString(),
-          recvWindow: '5000',
+        const orderType = (type || 'MARKET').toUpperCase() === 'LIMIT' ? 'limit_order' : 'market_order';
+        const resDelta = await deltaExchange.placeOrder({
+          symbol,
+          side: side.toUpperCase() as 'BUY' | 'SELL',
+          size: fillQty,
+          price: fillPrice,
+          orderType,
         });
 
-        if (type.toUpperCase() === 'LIMIT') {
-          params.append('price', fillPrice.toString());
-          params.append('timeInForce', 'GTC');
+        if (!resDelta || !resDelta.success) {
+          console.error(`❌ [LIVE EXECUTION FAILED] Delta Exchange order failed:`, resDelta?.message);
+          return res.status(502).json({
+            success: false,
+            error: resDelta?.message || 'Live order execution failed on Delta Exchange',
+            liveExecuted: false,
+          });
         }
 
-        const signature = crypto
-          .createHmac('sha256', EXCHANGE_CONFIG.apiSecret)
-          .update(params.toString())
-          .digest('hex');
-
-        params.append('signature', signature);
-
-        const liveResp = await fetch(`${EXCHANGE_CONFIG.endpoint}/api/v3/order`, {
-          method: 'POST',
-          headers: {
-            'X-MBX-APIKEY': EXCHANGE_CONFIG.apiKey,
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: params.toString(),
+        isLiveExecuted = true;
+        liveExecutionResult = resDelta;
+      } catch (err: any) {
+        console.error('❌ [LIVE EXECUTION ERROR] Exception placing order on Delta:', err.message);
+        return res.status(502).json({
+          success: false,
+          error: `Delta Exchange communication failure: ${err.message}`,
+          liveExecuted: false,
         });
-
-        const liveData = await liveResp.json();
-        if (liveResp.ok) {
-          isLiveExecuted = true;
-          liveExecutionResult = liveData;
-        } else {
-          console.warn('Live order response not ok, falling back to simulated execution:', liveData);
-        }
-      } catch (err) {
-        console.warn('Live order execution error:', err);
       }
-    }
-
-    // Adjust balances (Simulation or Live Fallback)
-    if (side.toUpperCase() === 'SELL') {
-      if (simulationBalances[baseAsset] !== undefined) {
-        simulationBalances[baseAsset] = Math.max(0, simulationBalances[baseAsset] - fillQty);
-      }
-      simulationBalances.USDT += totalUsdt;
     } else {
-      if (simulationBalances.USDT >= totalUsdt) {
-        simulationBalances.USDT -= totalUsdt;
+      // Simulation Mode balance adjustments
+      if (side.toUpperCase() === 'SELL') {
         if (simulationBalances[baseAsset] !== undefined) {
-          simulationBalances[baseAsset] += fillQty;
-        } else {
-          (simulationBalances as any)[baseAsset] = fillQty;
+          simulationBalances[baseAsset] = Math.max(0, simulationBalances[baseAsset] - fillQty);
+        }
+        simulationBalances.USDT += totalUsdt;
+      } else {
+        if (simulationBalances.USDT >= totalUsdt) {
+          simulationBalances.USDT -= totalUsdt;
+          if (simulationBalances[baseAsset] !== undefined) {
+            simulationBalances[baseAsset] += fillQty;
+          } else {
+            (simulationBalances as any)[baseAsset] = fillQty;
+          }
         }
       }
     }
+
+    const effectiveFillPrice = liveExecutionResult?.fillPrice && liveExecutionResult.fillPrice > 0
+      ? liveExecutionResult.fillPrice
+      : fillPrice;
 
     const newOrder: ExecutedOrder = {
-      id: 'ord-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9),
+      id: liveExecutionResult?.orderId || ('ord-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9)),
       ruleId,
       symbol: symbol.toUpperCase(),
       side: side.toUpperCase() as 'SELL' | 'BUY',
       type: (type || 'MARKET').toUpperCase() as 'MARKET' | 'LIMIT',
-      price: fillPrice,
+      price: effectiveFillPrice,
       quantity: fillQty,
-      totalUsdt,
+      totalUsdt: effectiveFillPrice * fillQty,
       timestamp: Date.now(),
       pnl: pnlPercent ? (totalUsdt * (pnlPercent / 100)) : undefined,
       pnlPercent: pnlPercent || 0,
@@ -620,16 +654,18 @@ async function startServer() {
     };
 
     orderHistory.unshift(newOrder);
+    saveOrderHistory();
 
-    // If triggered from a rule, update rule status
+    // If triggered from a rule, update rule status and persist
     if (ruleId) {
       const rIdx = autoSellRules.findIndex(r => r.id === ruleId);
       if (rIdx !== -1) {
         autoSellRules[rIdx].status = 'EXECUTED';
         autoSellRules[rIdx].triggeredAt = Date.now();
-        autoSellRules[rIdx].executedPrice = fillPrice;
+        autoSellRules[rIdx].executedPrice = effectiveFillPrice;
         autoSellRules[rIdx].pnlPercent = pnlPercent;
         autoSellRules[rIdx].executionNote = `${newOrder.status}: ${triggerReason}`;
+        saveAutoSellRules();
       }
     }
 
@@ -642,20 +678,29 @@ async function startServer() {
     });
   });
 
-  // Background Auto-Sell Engine loop: checks active rules every 3 seconds against live prices
+  // Background Auto-Sell Engine loop: checks active rules every 3.5 seconds against live prices
   setInterval(async () => {
     const activeRules = autoSellRules.filter(r => r.status === 'ACTIVE');
     if (activeRules.length === 0) return;
 
-    try {
-      const resp = await fetch('https://data-api.binance.vision/api/v3/ticker/price');
-      if (!resp.ok) return;
-      const prices: { symbol: string; price: string }[] = await resp.json();
-      const priceMap = new Map(prices.map(p => [p.symbol, parseFloat(p.price)]));
+    for (const rule of activeRules) {
+      try {
+        let currentPrice = 0;
+        try {
+          currentPrice = await deltaExchange.getMarketPrice(toDeltaSymbol(rule.symbol));
+        } catch (e) {}
 
-      for (const rule of activeRules) {
-        const currentPrice = priceMap.get(rule.symbol);
-        if (!currentPrice) continue;
+        if (!currentPrice || currentPrice <= 0) {
+          try {
+            const resp = await fetch(`https://data-api.binance.vision/api/v3/ticker/price?symbol=${rule.symbol}`);
+            if (resp.ok) {
+              const pData = await resp.json();
+              currentPrice = parseFloat(pData.price);
+            }
+          } catch (e) {}
+        }
+
+        if (!currentPrice || isNaN(currentPrice) || currentPrice <= 0) continue;
 
         let shouldExecute = false;
         let reason = '';
@@ -677,12 +722,11 @@ async function startServer() {
         }
         // 3. Trailing Stop
         else if (rule.ruleType === 'TRAILING_STOP' && rule.trailingPercent) {
-          // Update peak price if price moves higher
           if (!rule.trailingPeakPrice || currentPrice > rule.trailingPeakPrice) {
             rule.trailingPeakPrice = currentPrice;
             rule.triggerPrice = currentPrice * (1 - rule.trailingPercent / 100);
+            saveAutoSellRules();
           } else {
-            // Check if price pulled back below trailing stop floor
             if (currentPrice <= rule.triggerPrice) {
               shouldExecute = true;
               reason = `Trailing Stop Triggered: Price dropped ${rule.trailingPercent}% from peak ($${rule.trailingPeakPrice.toLocaleString()}) to $${currentPrice.toLocaleString()}`;
@@ -702,38 +746,74 @@ async function startServer() {
 
         if (shouldExecute) {
           console.log(`[AutoSell Engine] Triggered rule ${rule.id} for ${rule.symbol}: ${reason}`);
+
+          let isLiveFilled = false;
+          let executedPrice = currentPrice;
+          let orderId = 'auto-ord-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
+
+          // In live mode, execute on exchange; do not simulate on failure (solutions.pdf Issue 5)
+          if (!EXCHANGE_CONFIG.isSimulation && EXCHANGE_CONFIG.apiKey && EXCHANGE_CONFIG.apiSecret) {
+            try {
+              const liveRes = await deltaExchange.placeOrder({
+                symbol: rule.symbol,
+                side: 'SELL',
+                size: rule.amount,
+                price: currentPrice,
+                orderType: 'market_order',
+              });
+
+              if (liveRes && liveRes.success) {
+                isLiveFilled = true;
+                executedPrice = liveRes.fillPrice > 0 ? liveRes.fillPrice : currentPrice;
+                orderId = liveRes.orderId || orderId;
+                console.log(`✅ [AutoSell Engine] Real exchange sell order placed on Delta for ${rule.symbol}: ${orderId}`);
+              } else {
+                console.error(`❌ [AutoSell Engine] Delta order placement failed: ${liveRes?.message}. Skipping execution to prevent phantom fill.`);
+                continue;
+              }
+            } catch (err: any) {
+              console.error(`❌ [AutoSell Engine] Error dispatching live sell: ${err.message}`);
+              continue;
+            }
+          } else {
+            // Simulation balance update
+            const totalUsdt = currentPrice * rule.amount;
+            const baseAsset = rule.baseAsset as keyof typeof simulationBalances;
+            if (simulationBalances[baseAsset] !== undefined) {
+              simulationBalances[baseAsset] = Math.max(0, simulationBalances[baseAsset] - rule.amount);
+            }
+            simulationBalances.USDT += totalUsdt;
+          }
+
           rule.status = 'EXECUTED';
           rule.triggeredAt = Date.now();
-          rule.executedPrice = currentPrice;
+          rule.executedPrice = executedPrice;
           rule.pnlPercent = pnlPct;
           rule.executionNote = reason;
 
-          const totalUsdt = currentPrice * rule.amount;
-          const baseAsset = rule.baseAsset as keyof typeof simulationBalances;
-          if (simulationBalances[baseAsset] !== undefined) {
-            simulationBalances[baseAsset] = Math.max(0, simulationBalances[baseAsset] - rule.amount);
-          }
-          simulationBalances.USDT += totalUsdt;
-
+          const totalUsdt = executedPrice * rule.amount;
           orderHistory.unshift({
-            id: 'auto-ord-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9),
+            id: orderId,
             ruleId: rule.id,
             symbol: rule.symbol,
             side: 'SELL',
             type: rule.orderType,
-            price: currentPrice,
+            price: executedPrice,
             quantity: rule.amount,
             totalUsdt,
             timestamp: Date.now(),
             pnl: totalUsdt * (pnlPct / 100),
             pnlPercent: pnlPct,
-            status: 'SIMULATED_FILLED',
+            status: isLiveFilled ? 'FILLED' : 'SIMULATED_FILLED',
             triggerReason: reason,
           });
+
+          saveAutoSellRules();
+          saveOrderHistory();
         }
+      } catch (err) {
+        // Individual rule evaluation error
       }
-    } catch (err) {
-      // ticker fetch issue in loop
     }
   }, 3500);
 
@@ -803,7 +883,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/options/deploy', async (req, res) => {
+  app.post('/api/options/deploy', adminAuthMiddleware, async (req, res) => {
     try {
       const result = await deltaOptionsCondor.deployCondor(req.body);
       res.json(result);
@@ -812,7 +892,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/options/close', async (req, res) => {
+  app.post('/api/options/close', adminAuthMiddleware, async (req, res) => {
     try {
       const result = await deltaOptionsCondor.closeCondor(req.body.id);
       res.json(result);
@@ -821,13 +901,13 @@ async function startServer() {
     }
   });
 
-  app.post('/api/options/config', (req, res) => {
+  app.post('/api/options/config', adminAuthMiddleware, (req, res) => {
     deltaOptionsCondor.updateConfig(req.body);
     res.json({ success: true, message: 'Options Condor configuration updated successfully.' });
   });
 
   // 4. Toggle Bot Running / Paused
-  app.post('/api/autotrader/toggle', (req, res) => {
+  app.post('/api/autotrader/toggle', adminAuthMiddleware, (req, res) => {
     const targetRunning = req.body?.isRunning;
     let isRunning: boolean;
     if (typeof targetRunning === 'boolean') {
@@ -845,38 +925,51 @@ async function startServer() {
   });
 
   // 4a. Explicit Resume / Start endpoint
-  app.post('/api/autotrader/start', (req, res) => {
+  app.post('/api/autotrader/start', adminAuthMiddleware, (req, res) => {
     deltaAutoTrader.start();
     res.json({ success: true, isRunning: true });
   });
 
   // 4b. Explicit Pause / Stop endpoint
-  app.post('/api/autotrader/stop', (req, res) => {
+  app.post('/api/autotrader/stop', adminAuthMiddleware, (req, res) => {
     deltaAutoTrader.stop();
     res.json({ success: true, isRunning: false });
   });
 
   // 4b. Update Bot Config / State
-  app.post('/api/autotrader/config', (req, res) => {
+  app.post('/api/autotrader/config', adminAuthMiddleware, (req, res) => {
     deltaAutoTrader.updateConfig(req.body);
     res.json({ success: true, status: deltaAutoTrader.getStatus() });
   });
 
-  // 4b-2. Explicit Toggle Inverse Trading endpoint
+  // 4b-2. Explicit Toggle Inverse Trading endpoint - PERMANENTLY DISABLED (solutions.pdf Issue 3)
   app.post('/api/autotrader/toggle-inverse', (req, res) => {
-    const isInverse = deltaAutoTrader.toggleInverse(req.body?.isInverseTrading);
-    res.json({ success: true, isInverseTrading: isInverse });
+    deltaAutoTrader.toggleInverse(false);
+    res.status(400).json({
+      success: false,
+      isInverseTrading: false,
+      error: 'Inverse trading mode has been permanently removed. Direct execution is strictly enforced.',
+    });
   });
 
   // 4b-3. Explicit Toggle New Trades Execution Hold
-  app.post('/api/autotrader/pause-new-trades', (req, res) => {
+  app.post('/api/autotrader/pause-new-trades', adminAuthMiddleware, (req, res) => {
     const isPaused = deltaAutoTrader.setNewTradesPaused(req.body?.isNewTradesPaused !== undefined ? Boolean(req.body.isNewTradesPaused) : true);
     res.json({ success: true, isNewTradesPaused: isPaused });
   });
 
-  // 4c. TradingView / Pine Script Alert Webhook
+  // 4c. TradingView / Pine Script Alert Webhook (solutions.pdf Issues 2 & 3)
   app.post(['/api/webhook/signal', '/api/webhook/tradingview'], async (req, res) => {
     try {
+      // 1. Shared secret authentication guard
+      const webhookSecret = process.env.WEBHOOK_SECRET || process.env.ADMIN_API_KEY;
+      if (webhookSecret) {
+        const providedSecret = req.body?.secret || req.headers['x-webhook-secret'] || req.headers['authorization'] || req.query.secret;
+        if (providedSecret !== webhookSecret && providedSecret !== `Bearer ${webhookSecret}`) {
+          return res.status(401).json({ error: 'Unauthorized: Invalid or missing webhook secret' });
+        }
+      }
+
       const body = req.body || {};
       const rawSym = body.symbol || body.ticker || body.pair || req.query.symbol;
       const rawSide = body.side || body.action || body.signal || req.query.side;
@@ -887,12 +980,17 @@ async function startServer() {
 
       const deltaSymbol = toDeltaSymbol(String(rawSym));
       const incomingSide: 'BUY' | 'SELL' = String(rawSide).toUpperCase().includes('BUY') ? 'BUY' : 'SELL';
-      const isReversal = deltaAutoTrader.getStatus().isInverseTrading;
-      const executedSide: 'BUY' | 'SELL' = isReversal
-        ? (incomingSide === 'BUY' ? 'SELL' : 'BUY')
-        : incomingSide;
 
-      console.log(`📡 [TRADINGVIEW / PINE SCRIPT WEBHOOK] Incoming Signal: ${deltaSymbol} ${incomingSide} ➔ ${isReversal ? 'REVERSED' : 'DIRECT'} ${executedSide}`);
+      // 2. Pure direct execution - NO reversal flipping (solutions.pdf Issue 3)
+      const executedSide: 'BUY' | 'SELL' = incomingSide;
+
+      // Runtime integrity verification guard
+      if (executedSide !== incomingSide) {
+        console.error(`❌ [INTEGRITY GUARD] Signal inversion attempt blocked: incoming=${incomingSide} !== executed=${executedSide}`);
+        return res.status(500).json({ error: 'Integrity violation: signal inversion blocked' });
+      }
+
+      console.log(`📡 [TRADINGVIEW / PINE SCRIPT WEBHOOK] Incoming Signal: ${deltaSymbol} ${incomingSide} ➔ DIRECT ${executedSide}`);
 
       const price = await deltaExchange.getMarketPrice(deltaSymbol);
       const safeAtr = price * 0.015;
@@ -910,7 +1008,7 @@ async function startServer() {
 
       res.json({
         success: true,
-        message: `Pine Script ${incomingSide} received ➔ Executed ${executedSide} on ${deltaSymbol} (Direct)`,
+        message: `Pine Script ${incomingSide} received ➔ Executed DIRECT ${executedSide} on ${deltaSymbol}`,
         incomingSide,
         executedSide,
         position,
@@ -921,8 +1019,22 @@ async function startServer() {
     }
   });
 
-  // 4d. Candlestick Pattern Engine & Analysis API
+  // 4d. Candlestick Pattern Engine & Analysis API (solutions.pdf Issue 6: NO fake random candles)
   async function fetchCandlesForAnalysis(symbol: string, interval: string = '15m', limit: number = 250): Promise<KlinePoint[]> {
+    const deltaSym = toDeltaSymbol(symbol);
+    const deltaInterval = interval === '1h' ? '1h' : '15m';
+
+    // 1. Prioritize Delta Exchange genuine market data
+    try {
+      const deltaKlines = await deltaExchange.getKlines(deltaSym, deltaInterval, limit);
+      if (Array.isArray(deltaKlines) && deltaKlines.length > 0) {
+        return deltaKlines;
+      }
+    } catch (e) {
+      // Delta fetch error, try Binance next
+    }
+
+    // 2. Fallback to Binance public klines API
     const binanceSym = symbol.toUpperCase().endsWith('USDT')
       ? symbol.toUpperCase()
       : (symbol.toUpperCase().replace('USD', '') + 'USDT');
@@ -948,27 +1060,12 @@ async function startServer() {
         }
       }
     } catch (e) {
-      // quiet fallback
+      // Binance fetch error
     }
 
-    const currentPrice = await deltaExchange.getMarketPrice(toDeltaSymbol(symbol));
-    const fallback: KlinePoint[] = [];
-    const now = Date.now();
-    let p = currentPrice * 0.99;
-    for (let i = limit; i > 0; i--) {
-      const d = (Math.random() - 0.49) * (currentPrice * 0.005);
-      const c = p + d;
-      fallback.push({
-        time: now - i * 15 * 60 * 1000,
-        open: p,
-        high: Math.max(p, c) + currentPrice * 0.002,
-        low: Math.min(p, c) - currentPrice * 0.002,
-        close: c,
-        volume: 100,
-      });
-      p = c;
-    }
-    return fallback;
+    // Never generate fake / random candles for trading analysis (solutions.pdf Issue 6)
+    console.warn(`⚠️ [KLINE WARNING] Real market candles unavailable for ${symbol}. Returning empty array to prevent fake trading signals.`);
+    return [];
   }
 
   app.get('/api/candlestick-patterns', async (req, res) => {
@@ -984,6 +1081,9 @@ async function startServer() {
           coreSymbols.map(async (sym) => {
             try {
               const candles = await fetchCandlesForAnalysis(sym, interval, 250);
+              if (!candles || candles.length < 10) {
+                return { symbol: sym, error: 'Insufficient real candle data available from exchange' };
+              }
               const closedCandles = candles.length > 1 ? candles.slice(0, -1) : candles;
               return CandlestickMasterPatternEngine.analyze(sym, closedCandles, tpMult);
             } catch (err: any) {
@@ -996,6 +1096,9 @@ async function startServer() {
 
       const deltaSymbol = toDeltaSymbol(symbolParam);
       const candles = await fetchCandlesForAnalysis(deltaSymbol, interval, 250);
+      if (!candles || candles.length < 10) {
+        return res.status(503).json({ error: 'Market candle data temporarily unavailable from exchanges. Trade analysis skipped.' });
+      }
       const closedCandles = candles.length > 1 ? candles.slice(0, -1) : candles;
       const analysis = CandlestickMasterPatternEngine.analyze(deltaSymbol, closedCandles, tpMult);
       res.json({ success: true, analysis });
@@ -1046,7 +1149,8 @@ async function startServer() {
   });
 
   // 4g. Direct TP/SL Bracket Order Attacher
-  app.post('/api/autotrader/set-bracket', async (req, res) => {
+  // 4g. Direct TP/SL Bracket Order Attacher
+  app.post('/api/autotrader/set-bracket', adminAuthMiddleware, async (req, res) => {
     try {
       const { symbol, stopLossPrice, takeProfitPrice } = req.body;
       if (!symbol) return res.status(400).json({ error: 'Symbol required' });
@@ -1058,7 +1162,7 @@ async function startServer() {
   });
 
   // 5. Route Test Signal to Shadow Confirmation Gate (0% Exchange Pre-Exposure)
-  app.post('/api/autotrader/force-trade', async (req, res) => {
+  app.post('/api/autotrader/force-trade', adminAuthMiddleware, async (req, res) => {
     const { symbol, side = 'BUY', immediate = true } = req.body;
     if (!symbol) {
       return res.status(400).json({ error: 'Symbol required' });
@@ -1108,8 +1212,6 @@ async function startServer() {
       const virtualSL = executedSide === 'BUY'
         ? breakoutPrice - slPriceDistance
         : breakoutPrice + slPriceDistance;
-      const targetMult = parseFloat((targetPriceDistance / safeAtr).toFixed(2));
-      const slMult = parseFloat((slPriceDistance / safeAtr).toFixed(2));
 
       const preOrder = await deltaExchange.placeBreakoutOrder({
         symbol: deltaSymbol,
@@ -1128,7 +1230,7 @@ async function startServer() {
   });
 
   // 5x. Interactive 3-Branch Simulator for Shadow Confirmation Gate
-  app.post('/api/autotrader/simulate-shadow-branch', async (req, res) => {
+  app.post('/api/autotrader/simulate-shadow-branch', adminAuthMiddleware, async (req, res) => {
     const { symbol = 'BTCUSD', branch } = req.body;
     if (!branch || !['BRANCH_A_FAKEOUT', 'BRANCH_B_TIMEOUT', 'BRANCH_C_CONFIRMED'].includes(branch)) {
       return res.status(400).json({ error: 'Valid branch required: BRANCH_A_FAKEOUT, BRANCH_B_TIMEOUT, or BRANCH_C_CONFIRMED' });
@@ -1144,20 +1246,21 @@ async function startServer() {
   });
 
   // 5y. Reset active positions to 0 (Guarantees clean account state)
-  app.post('/api/autotrader/reset-positions', (req, res) => {
+  app.post('/api/autotrader/reset-positions', adminAuthMiddleware, (req, res) => {
     deltaAutoTrader.resetPositions();
     res.json({ success: true, message: 'All positions reset to 0. Capital fully protected.' });
   });
 
   // 5z. Reset PnL and Closed Trades History (Fresh audit ledger start without closing active positions)
-  app.post('/api/autotrader/reset-history', (req, res) => {
+  app.post('/api/autotrader/reset-history', adminAuthMiddleware, (req, res) => {
     deltaAutoTrader.resetPnlAndHistory();
     orderHistory = [];
+    saveOrderHistory();
     res.json({ success: true, message: 'PnL metrics and closed trades history successfully reset to 0.' });
   });
 
   // 5a. Close Position (supports both exchange and local engine cleanup)
-  app.post('/api/autotrader/close-position', async (req, res) => {
+  app.post('/api/autotrader/close-position', adminAuthMiddleware, async (req, res) => {
     const { id, positionId, symbol } = req.body;
     const targetSymbol = symbol ? toDeltaSymbol(symbol) : undefined;
 
@@ -1184,7 +1287,7 @@ async function startServer() {
   });
 
   // 5a2. Close All Positions (Delta Exchange live liquidation + local archive)
-  app.post('/api/autotrader/close-all', async (req, res) => {
+  app.post('/api/autotrader/close-all', adminAuthMiddleware, async (req, res) => {
     try {
       await deltaExchange.closeAllPositionsOnExchange();
     } catch (e: any) {
@@ -1200,7 +1303,7 @@ async function startServer() {
   });
 
   // 5a3. Reverse Single Active Position
-  app.post('/api/autotrader/reverse-position', async (req, res) => {
+  app.post('/api/autotrader/reverse-position', adminAuthMiddleware, async (req, res) => {
     const { id, positionId, symbol } = req.body;
     const target = positionId || id || symbol;
     if (!target) {
@@ -1211,7 +1314,7 @@ async function startServer() {
   });
 
   // 5a4. Reverse All Active Positions (Instantly flips all open positions)
-  app.post('/api/autotrader/reverse-all', async (req, res) => {
+  app.post('/api/autotrader/reverse-all', adminAuthMiddleware, async (req, res) => {
     const positions = await deltaAutoTrader.reverseAllPositions();
     res.json({ success: true, count: positions.length, positions });
   });

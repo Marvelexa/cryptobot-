@@ -1593,10 +1593,8 @@ export class DeltaAutoTraderEngine {
             continue;
           }
 
-          const executionMode: TradeExecutionMode = this.state.isInverseTrading ? 'INVERSE_RAW' : 'DIRECT';
-          const modeTag = this.state.isInverseTrading
-            ? `[INVERSE: ${candidateSignal} ➔ ${finalSide} | TF:${candidate.multiSignal.timeframe}]`
-            : `[DIRECT: ${finalSide} | TF:${candidate.multiSignal.timeframe}]`;
+          const executionMode: TradeExecutionMode = 'DIRECT';
+          const modeTag = `[DIRECT: ${finalSide} | TF:${candidate.multiSignal.timeframe}]`;
           const finalStrategyName = `${candidateStrategyName} ${modeTag}`;
 
           console.log(`🎯 [MULTI-STRATEGY DISPATCH] ${candidate.cleanDeltaSym} (${candidate.multiSignal.timeframe}): Strategy="${candidateStrategyName}" (Score: ${candidate.multiSignal.confidenceScore}) ➔ EXECUTING ${finalSide} @ $${liveExecutionPrice.toFixed(4)}. Direction: BUY=${currentBuyCount} SELL=${currentSellCount}.`);
@@ -2570,11 +2568,11 @@ export class DeltaAutoTraderEngine {
     return [...this.closedTradesHistory];
   }
 
-  public toggleInverse(explicitState?: boolean): boolean {
-    this.state.isInverseTrading = explicitState !== undefined ? explicitState : !this.state.isInverseTrading;
+  public toggleInverse(_explicitState?: boolean): boolean {
+    this.state.isInverseTrading = false;
     this.saveState();
-    console.log(`🔄 [INVERSE MODE] Set to ${this.state.isInverseTrading ? 'ON' : 'OFF'}`);
-    return this.state.isInverseTrading;
+    console.log(`🔒 [INVERSE MODE DEPRECATED] Direct execution is permanently locked and enforced.`);
+    return false;
   }
 
   public setNewTradesPaused(paused: boolean): boolean {
@@ -2595,7 +2593,7 @@ export class DeltaAutoTraderEngine {
     if (config.isNewTradesPaused !== undefined) {
       this.state.isNewTradesPaused = config.isNewTradesPaused;
     }
-    this.state = { ...this.state, ...config };
+    this.state = { ...this.state, ...config, isInverseTrading: false };
     if (config.maxConcurrentPositions !== undefined) {
       this.state.maxConcurrentPositions = config.maxConcurrentPositions;
     } else if (!this.state.maxConcurrentPositions) {
