@@ -1071,11 +1071,13 @@ async function startServer() {
       const safeAtr = price * 0.015;
       const notionalUSD = (status.accountCapitalUSD * (status.marginPercentPerTrade / 100)) * status.leverage;
 
-      // Execute according to active trader inverse mode: if inverse is false, strictly execute requestedSide directly!
+      // Direct execution: strictly execute requestedSide directly without conditional inversions (solutions.pdf Item 1)
       const requestedSide: 'BUY' | 'SELL' = side.toUpperCase() as 'BUY' | 'SELL';
-      const executedSide: 'BUY' | 'SELL' = (status.isInverseTrading ?? false)
-        ? (requestedSide === 'BUY' ? 'SELL' : 'BUY')
-        : requestedSide;
+      const executedSide: 'BUY' | 'SELL' = requestedSide;
+      if (executedSide !== requestedSide) {
+        console.error(`❌ [INTEGRITY GUARD] Signal flip blocked: executedSide=${executedSide} !== requestedSide=${requestedSide}. Aborting trade.`);
+        return res.status(400).json({ error: 'Signal side mismatch' });
+      }
 
       if (immediate) {
         const position = await deltaAutoTrader.executeNewPosition({
@@ -1229,14 +1231,12 @@ async function startServer() {
     const status = deltaAutoTrader.getStatus();
     const notionalUSD = (status.accountCapitalUSD * (status.marginPercentPerTrade / 100)) * status.leverage;
 
-    // Execute according to active trader inverse mode: if inverse is false, strictly execute requestedSide directly!
+    // Direct execution: strictly execute requestedSide directly without conditional inversions (solutions.pdf Item 1)
     const requestedSide: 'BUY' | 'SELL' = params.side;
-    const executedSide: 'BUY' | 'SELL' = (status.isInverseTrading ?? false)
-      ? (requestedSide === 'BUY' ? 'SELL' : 'BUY')
-      : requestedSide;
-
-    if (status.isInverseTrading) {
-      console.log(`🔄 [INVERSE TRIGGER] ${deltaSymbol}: Signal=${params.side} ➔ Executing ${executedSide}`);
+    const executedSide: 'BUY' | 'SELL' = requestedSide;
+    if (executedSide !== requestedSide) {
+      console.error(`❌ [INTEGRITY GUARD] Signal flip blocked: executedSide=${executedSide} !== requestedSide=${requestedSide}. Aborting trade.`);
+      throw new Error(`Signal side mismatch: ${requestedSide} vs ${executedSide}`);
     }
 
     const breakoutPrice = executedSide === 'BUY'

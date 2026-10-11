@@ -853,16 +853,16 @@ export class QuantMathematicalEngine {
         buyD = 20;
         reasons.push(`🛡️ [RANGE FLOOR BOUNCE] Bullish Bounce at Support Zone $${sr.nearestSupport} (+20 D BUY)`);
       } else {
-        // Counter-trend in downtrend or falling velocity: only award points if strong hammer rejection
+        // Counter-trend dip bounce or falling velocity: award points for bottom bounce/absorption
         const lastBarD = candles[candles.length - 1];
         const rangeD = Math.max(lastBarD.high - lastBarD.low, 0.0001);
         const lowerWickD = Math.min(lastBarD.open, lastBarD.close) - lastBarD.low;
-        if ((lowerWickD / rangeD) >= 0.40 && lastBarD.close > lastBarD.open && superSmootherSlope >= -0.015) {
-          buyD = 10;
-          reasons.push(`🛡️ [SUPPORT ABSORPTION WICK] Counter-trend lower wick at Support (+10 D BUY)`);
+        if ((lowerWickD / rangeD) >= 0.30 || lastBarD.close > lastBarD.open) {
+          buyD = 20;
+          reasons.push(`🛡️ [SUPPORT ABSORPTION BOUNCE] Bullish Reversal at Support Zone $${sr.nearestSupport} (+20 D BUY)`);
         } else {
-          buyD = 0;
-          reasons.push(`⚠️ [SUPPORT VULNERABLE] Support Zone $${sr.nearestSupport} under downward pressure (0 pts BUY)`);
+          buyD = 10;
+          reasons.push(`🛡️ [SUPPORT ABSORPTION WICK] Lower wick at Support Zone $${sr.nearestSupport} (+10 D BUY)`);
         }
       }
     } else if (sr.isAtResistance && !sr.resistanceBreakConfirmed) {
@@ -871,13 +871,8 @@ export class QuantMathematicalEngine {
       reasons.push(`Testing Resistance Zone $${sr.nearestResistance} (+10 D SELL)`);
     } else if (sr.isAtSupport && !sr.supportBreakConfirmed) {
       // Testing support without confirmed trigger
-      if (superSmootherSlope >= -0.015 && (isMacroBullish || marketRegime === 'RANGE')) {
-        buyD = 10;
-        reasons.push(`Testing Support Zone $${sr.nearestSupport} in Uptrend/Range (+10 D BUY)`);
-      } else {
-        // In a downtrend or falling velocity, merely testing support is fragile and often precedes breakdown
-        reasons.push(`⚠️ Support Zone $${sr.nearestSupport} under downward pressure (0 pts BUY)`);
-      }
+      buyD = 10;
+      reasons.push(`Testing Support Zone $${sr.nearestSupport} (+10 D BUY)`);
     } else {
       // Open air structure: reward direction with clean clearance to opposing zone
       if (currentPrice > sr.nearestSupport && (sr.nearestResistance - currentPrice) > atr * 1.2 && isMacroBullish && superSmootherSlope > 0) {

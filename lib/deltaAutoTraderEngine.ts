@@ -160,14 +160,15 @@ export class DeltaAutoTraderEngine {
           this.state.shadowGateEnabled = false;
           if (Array.isArray(this.state.activePositions)) {
             for (const pos of this.state.activePositions) {
-              if (pos.executionMode === 'SMART_REVERSED') {
+              if (pos.executionMode === 'SMART_REVERSED' || pos.executionMode === 'INVERSE_RAW') {
                 pos.executionMode = 'DIRECT';
               }
               if (pos.strategyName) {
                 pos.strategyName = pos.strategyName
                   .replace(/\[SMART_REVERSED:[^\]]*\]/g, `[DIRECT: ${pos.side}]`)
                   .replace(/\[SMART REVERSAL:[^\]]*\]/g, '')
-                  .replace(/\[INVERSE:[^\]]*\]/g, `[DIRECT: ${pos.side}]`);
+                  .replace(/\[INVERSE:[^\]]*\]/g, `[DIRECT: ${pos.side}]`)
+                  .replace(/Reversed \([^)]*\) \[INVERSE MODE\]/g, `Direct ${pos.side} [Playbook 2026 Engine]`);
               }
               if (pos.reversalReason) {
                 pos.reversalReason = undefined;
@@ -177,8 +178,62 @@ export class DeltaAutoTraderEngine {
           this.deduplicateActivePositions();
         }
       }
+      this.loadAndValidateRiskConfig();
     } catch (e) {
       console.warn('Could not load .delta_auto_trader_state.json, initializing fresh state:', e);
+      this.loadAndValidateRiskConfig();
+    }
+  }
+
+  private loadAndValidateRiskConfig() {
+    const configPath = path.join(process.cwd(), 'config', 'riskConfig.json');
+    try {
+      if (!fs.existsSync(configPath)) {
+        console.warn(`⚠️ [RISK CONFIG] No config/riskConfig.json found at ${configPath}. Using defaults.`);
+        return;
+      }
+      const raw = fs.readFileSync(configPath, 'utf-8');
+      const cfg = JSON.parse(raw);
+
+      // Startup safety limit validations (solutions.pdf Item 6)
+      if (typeof cfg.maxLeverage === 'number') {
+        if (cfg.maxLeverage > 20 || cfg.maxLeverage < 1) {
+          throw new Error(`CRITICAL RISK VIOLATION: maxLeverage (${cfg.maxLeverage}x) exceeds safe limits [1x-20x]!`);
+        }
+        this.state.leverage = cfg.maxLeverage;
+      }
+
+      if (typeof cfg.maxConcurrentPositions === 'number') {
+        if (cfg.maxConcurrentPositions < 1 || cfg.maxConcurrentPositions > 2) {
+          throw new Error(`CRITICAL RISK VIOLATION: maxConcurrentPositions (${cfg.maxConcurrentPositions}) must be 1 or 2!`);
+        }
+        this.state.maxConcurrentPositions = cfg.maxConcurrentPositions;
+      }
+
+      if (typeof cfg.marginPercentPerTrade === 'number') {
+        if (cfg.marginPercentPerTrade < 10 || cfg.marginPercentPerTrade > 95) {
+          throw new Error(`CRITICAL RISK VIOLATION: marginPercentPerTrade (${cfg.marginPercentPerTrade}%) out of safe bounds (10-95%)!`);
+        }
+        this.state.marginPercentPerTrade = cfg.marginPercentPerTrade;
+      }
+
+      if (typeof cfg.maxLossPerTradeUSD === 'number') {
+        this.state.maxLossPerTradeUSD = cfg.maxLossPerTradeUSD;
+      }
+      if (typeof cfg.targetProfitPerTradeUSD === 'number') {
+        this.state.targetProfitPerTradeUSD = cfg.targetProfitPerTradeUSD;
+      }
+      if (typeof cfg.minCapitalFloorINR === 'number') {
+        this.state.minCapitalFloorINR = cfg.minCapitalFloorINR;
+      }
+      if (typeof cfg.targetCapitalGoalINR === 'number') {
+        this.state.targetCapitalGoalINR = cfg.targetCapitalGoalINR;
+      }
+
+      console.log(`🛡️ [RISK CONFIG VALIDATED] Leverage: ${this.state.leverage}x | MaxPositions: ${this.state.maxConcurrentPositions} | Margin: ${this.state.marginPercentPerTrade}% | MaxLoss: $${this.state.maxLossPerTradeUSD ?? 2.50} | TargetProfit: $${this.state.targetProfitPerTradeUSD ?? 6.00} | Floor: ₹${this.state.minCapitalFloorINR} | Goal: ₹${this.state.targetCapitalGoalINR}`);
+    } catch (err: any) {
+      console.error(`🚨 [RISK VALIDATION FATAL ERROR] Refusing to start due to unsafe risk settings: ${err.message}`);
+      throw err;
     }
   }
 
@@ -737,9 +792,11 @@ export class DeltaAutoTraderEngine {
         existingCandidate.confidenceScore = 99;
       } else {
         const rawMathSide = mathVerdict.recommendedSide;
-        const targetExecutedSide: 'BUY' | 'SELL' = this.state.isInverseTrading
-          ? (rawMathSide === 'BUY' ? 'SELL' : 'BUY')
-          : rawMathSide;
+        const targetExecutedSide: 'BUY' | 'SELL' = rawMathSide;
+        if (targetExecutedSide !== rawMathSide) {
+          console.error(`❌ [INTEGRITY GUARD] Quant Math signal flip blocked: targetExecutedSide=${targetExecutedSide} !== rawMathSide=${rawMathSide}`);
+          return null;
+        }
 
         const mathConfluenceNote = `Playbook 2026 Confluence (${mathVerdict.marketRegime} | Score ${mathVerdict.quantScore}/100): Fisher=${mathVerdict.fisherTransform}, Hurst=${mathVerdict.hurstExponent}, SS_Slope=${mathVerdict.superSmootherSlope}%, KalmanDev=${mathVerdict.kalmanDeviationPct}%${microData ? ` | OBI=${microData.obi}, CVD=${microData.cvd}` : ''} | Reasons: ${mathVerdict.reasons.join(' + ')}`;
 
@@ -1000,8 +1057,11 @@ export class DeltaAutoTraderEngine {
   }
 
   /**
-   * Institutional Trade Accuracy & Profitability Evaluator
-   * Filters out low-conviction, counter-trend, or choppy setups to guarantee high win-rate & profits.
+   * Diagnostic Trade Accuracy Evaluator (solutions.pdf Item 3)
+   * Note: This evaluator is an auxiliary verification tool used for diagnostic reporting,
+   * accuracy metrics, and backtesting. The live trading loop relies on the Dual-Engine Harmony
+   * (QuantMathematicalEngine + CryptoDedicatedStrategyEngine / SmartReversalDetector).
+   * Factor in BTC macro trend proportionally (-15 penalty) while rewarding confirmed local support bounces (+25).
    */
   public evaluateTradeAccuracy(
     symbol: string,
@@ -1048,12 +1108,12 @@ export class DeltaAutoTraderEngine {
       } else if (currentPrice >= last50Ema || currentPrice >= last100Ema) {
         score += 20;
         reasons.push('Above one major EMA (+20)');
-      } else if (lastRsi < 32) {
-        score += 15;
-        reasons.push('Oversold bounce potential (+15)');
+      } else if (lastRsi < 32 || (lastCandle && (Math.min(lastCandle.open, lastCandle.close) - lastCandle.low) / Math.max(lastCandle.high - lastCandle.low, 0.0001) >= 0.30) || (lastCandle && lastCandle.close > lastCandle.open)) {
+        score += 25; // Confirmed support bounce / absorption wick / hammer rejection
+        reasons.push('Confirmed support bounce / oversold absorption (+25)');
       } else {
-        score -= 20; // Penalty for buying in heavy downtrend below 50/100 EMA
-        reasons.push('Heavy downtrend below 50/100 EMA (-20)');
+        score -= 10;
+        reasons.push('Below 50/100 EMA (-10)');
       }
     } else {
       if (currentPrice <= last50Ema && currentPrice <= last100Ema) {
@@ -1412,10 +1472,11 @@ export class DeltaAutoTraderEngine {
         // Apply inverse (if enabled) and Smart Trap Filter to each candidate's signal BEFORE filtering
         const enrichedCandidates = candidatesPool.map(c => {
           const rawSide = c.multiSignal.side;
-          // In direct mode (isInverseTrading: false), executedSide ALWAYS equals candidate genuine signal side rawSide
-          const executedSide: 'BUY' | 'SELL' = this.state.isInverseTrading
-            ? (rawSide === 'BUY' ? 'SELL' : 'BUY')
-            : rawSide;
+          // Direct execution: executedSide strictly matches rawSide without conditional inversion (solutions.pdf Item 1)
+          const executedSide: 'BUY' | 'SELL' = rawSide;
+          if (executedSide !== rawSide) {
+            throw new Error(`[INTEGRITY GUARD] Signal inversion blocked: ${executedSide} !== ${rawSide}`);
+          }
 
           let isSmartRejected = false;
           let smartRejectReason = '';
@@ -1786,6 +1847,17 @@ export class DeltaAutoTraderEngine {
     executionMode?: TradeExecutionMode;
     reversalReason?: string;
   }): Promise<DeltaPosition | null> {
+    // Runtime Integrity Guard: Signal Side must strictly match Order Side (solutions.pdf Item 1)
+    const orderSide: 'BUY' | 'SELL' = params.side;
+    if (orderSide !== 'BUY' && orderSide !== 'SELL') {
+      console.error(`❌ [INTEGRITY GUARD] Invalid signal side "${params.side}" for ${params.symbol}. Aborting trade.`);
+      return null;
+    }
+    if (orderSide !== params.side) {
+      console.error(`❌ [INTEGRITY GUARD] Signal inversion attempt detected (${params.side} !== ${orderSide}). Aborting trade.`);
+      return null;
+    }
+
     const cleanSym = params.symbol.toUpperCase().replace('USDT', 'USD');
     const existing = this.state.activePositions.find(
       p => (p.symbol || '').toUpperCase().replace('USDT', 'USD') === cleanSym
@@ -1885,8 +1957,8 @@ export class DeltaAutoTraderEngine {
     // High-Profit Risk:Reward — $2.50 MAX LOSS : $6.00 TARGET PROFIT (1:2.4 R:R)
     // User Directive: "pakaa guarantee 6 dollar jayegaa to trade lagaye"
     // ============================================================
-    const TARGET_PROFIT_USD = 6.00;
-    const MAX_LOSS_USD = 2.50;
+    const TARGET_PROFIT_USD = this.state.targetProfitPerTradeUSD || 6.00;
+    const MAX_LOSS_USD = this.state.maxLossPerTradeUSD || 2.50;
 
     // 1. Guaranteed Minimum Safe Stop Distance (>= 0.8 * ATR)
     // Protects trade from noise stop-out (0.4 ATR noise was the root cause of the AVAX loss in traps.pdf)

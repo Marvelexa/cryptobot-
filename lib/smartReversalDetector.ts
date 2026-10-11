@@ -487,7 +487,7 @@ export class SmartReversalDetector {
     // In a Downtrend (below 50 EMA):
     // Allow confirmed Bottom Reversals at support/exhaustion; reject unconfirmed falling knives
     if (originalSignal === 'BUY' && (isEmaBearStack || currentPrice < ema50 || currentPrice < ema200)) {
-      const hasBuyingPressure = lowerWickRatio >= 0.22 || lastBar.close > lastBar.open;
+      const hasBuyingPressure = lowerWickRatio >= 0.35 || (lastBar.close > lastBar.open && lowerWickRatio >= 0.15);
       const hasExhaustionOrSupport = rsi14 <= 38 || bb.percentB <= 0.25 || lowerWickRatio >= 0.30;
       if (hasBuyingPressure && hasExhaustionOrSupport) {
         return {
@@ -540,7 +540,7 @@ export class SmartReversalDetector {
     // NEVER flip a genuine SELL into a BUY (which caused buying tops right before market dumps)!
     if (originalSignal === 'SELL' && (isEmaBullStack || currentPrice > ema50 || currentPrice > ema200)) {
       // Confirmed top reversal with selling pressure (upper rejection wick or bearish candle) at exhaustion:
-      const hasSellingPressure = upperWickRatio >= 0.22 || lastBar.close < lastBar.open;
+      const hasSellingPressure = upperWickRatio >= 0.35 || (lastBar.close < lastBar.open && upperWickRatio >= 0.15);
       const hasExhaustionOrResistance = rsi14 >= 62 || bb.percentB >= 0.75 || upperWickRatio >= 0.30;
       if (hasSellingPressure && hasExhaustionOrResistance) {
         return {

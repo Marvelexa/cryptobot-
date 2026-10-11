@@ -461,6 +461,8 @@ export interface DeltaAutoTraderState {
   };
   minCapitalFloorINR?: number; // Minimum capital floor in INR before halting (e.g. 500)
   targetCapitalGoalINR?: number; // Target profit ceiling in INR (e.g. 4000) to secure profits and pause
+  maxLossPerTradeUSD?: number; // Max loss per trade in USD (e.g. 2.50)
+  targetProfitPerTradeUSD?: number; // Target profit per trade in USD (e.g. 6.00)
   recentFilteredTraps?: DeltaFilteredTrap[];
   lastError?: string;
 }
