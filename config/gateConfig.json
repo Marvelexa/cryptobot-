@@ -1,0 +1,8 @@
+{
+  "profitConfirmationSeconds": 6,
+  "lossConfirmationSeconds": 6,
+  "directionAtrThreshold": 0.05,
+  "directionProfitUsd": 0.15,
+  "minQualityScore": 60,
+  "symbolCooldownSeconds": 180
+}

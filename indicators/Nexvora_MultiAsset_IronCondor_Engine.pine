@@ -1,0 +1,297 @@
+//@version=6
+indicator("Nexvora Multi-Asset Dynamic Iron Condor Engine [BTC / ETH / XAUT]", shorttitle="NEX-IRON-CONDOR", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// =============================================================================
+// NEXVORA INSTITUTIONAL MULTI-ASSET IRON CONDOR ENGINE
+// Assets Supported: BTC, ETH, XAUT (Tether Gold) & Custom Crypto/Commodities
+// =============================================================================
+// Description:
+// Calculates dynamic statistical volatility corridors, Expected Move (EM),
+// and institutional strike levels (Long Call, Short Call, Short Put, Long Put).
+// Includes regime filters (ADX + Choppiness Index + Volatility Rank),
+// simulated cycle tracking, live break-even levels, and an on-chart HUD dashboard.
+// =============================================================================
+
+// =============================================================================
+// 1. INPUT CONFIGURATIONS
+// =============================================================================
+grp_asset   = "🪙 Asset & Expiry Settings"
+assetMode   = input.string("AUTO", "Asset Preset", options=["AUTO", "BTC", "ETH", "XAUT", "CUSTOM"], group=grp_asset, tooltip="AUTO detects asset from chart ticker, or manually choose preset.")
+dteDays     = input.int(7, "Target DTE (Days to Expiration)", minval=1, maxval=60, group=grp_asset, tooltip="Standard Crypto DTE: 7-14 days. XAUT: 14-30 days.")
+
+grp_strikes = "🎯 Strike & Wing Geometry"
+useAutoHv       = input.bool(true, "Auto-Calculate Volatility from Historical Volatility (HV)", group=grp_strikes)
+customIvInput   = input.float(55.0, "Manual IV (%) [If Auto-HV disabled]", minval=5.0, maxval=250.0, group=grp_strikes)
+ivPremiumRatio  = input.float(1.15, "IV / HV Premium Ratio", minval=0.8, maxval=2.0, step=0.05, group=grp_strikes, tooltip="Crypto Implied Volatility typically trades at 1.1x - 1.25x over HV.")
+shortStrikeMult = input.float(1.0, "Short Strike Distance (x Expected Move / 1-SD)", minval=0.6, maxval=2.5, step=0.1, group=grp_strikes, tooltip="1.0 EM approximates ~16 Delta (~68% win rate). 1.25 EM approximates ~10 Delta (~80% win rate).")
+wingWidthPct    = input.float(5.0, "Wing Width (% of Asset Price)", minval=0.5, maxval=20.0, step=0.5, group=grp_strikes, tooltip="Width of long wings for downside/upside tail risk protection.")
+creditRatio     = input.float(0.25, "Estimated Credit Captured (% of Wing Width)", minval=0.10, maxval=0.45, step=0.05, group=grp_strikes, tooltip="Standard target is 20-30% credit of total wing spread width.")
+
+grp_filters = "🛡️ Regime & Volatility Filters"
+useAdxFilter    = input.bool(true, "Enable ADX Non-Trending Filter", group=grp_filters)
+adxThreshold    = input.float(25.0, "Max ADX Threshold (Range-Bound Guard)", minval=15.0, maxval=40.0, group=grp_filters)
+useChopFilter   = input.bool(true, "Enable Choppiness Index Filter", group=grp_filters)
+chopThreshold   = input.float(48.0, "Min Choppiness Index (Anti-Trend Guard)", minval=38.0, maxval=62.0, group=grp_filters)
+useIvRankFilter = input.bool(true, "Require Elevated Volatility (IV/HV Rank > Threshold)", group=grp_filters)
+minVolRank      = input.float(30.0, "Minimum Volatility Rank (%)", minval=10.0, maxval=80.0, group=grp_filters, tooltip="Iron Condors should be entered when volatility is elevated to capture IV crush.")
+
+grp_visuals = "🎨 Display & HUD Dashboard"
+showZones       = input.bool(true, "Show Iron Condor Corridor & Wings", group=grp_visuals)
+showBreakevens  = input.bool(true, "Show Upper & Lower Breakevens", group=grp_visuals)
+showDashboard   = input.bool(true, "Show Institutional Telemetry HUD", group=grp_visuals)
+dashLocation    = input.string("Top Right", "Dashboard Position", options=["Top Right", "Bottom Right", "Top Left", "Bottom Left"], group=grp_visuals)
+
+// =============================================================================
+// 2. ASSET AUTODETECTION & PRESET CALIBRATION
+// =============================================================================
+tickerStr = syminfo.ticker
+
+detectedAsset = assetMode
+if assetMode == "AUTO"
+    if str.contains(tickerStr, "BTC") or str.contains(tickerStr, "XBT")
+        detectedAsset := "BTC"
+    else if str.contains(tickerStr, "ETH")
+        detectedAsset := "ETH"
+    else if str.contains(tickerStr, "XAU") or str.contains(tickerStr, "GOLD") or str.contains(tickerStr, "PAXG")
+        detectedAsset := "XAUT"
+    else
+        detectedAsset := "CUSTOM"
+
+// Set asset-specific strike rounding steps and defaults
+float strikeStep = 100.0
+if detectedAsset == "BTC"
+    strikeStep := 500.0
+else if detectedAsset == "ETH"
+    strikeStep := 25.0
+else if detectedAsset == "XAUT"
+    strikeStep := 10.0
+else
+    strikeStep := close > 5000.0 ? 100.0 : (close > 500.0 ? 10.0 : 1.0)
+
+// Helper function to round strikes to actual exchange option increments
+roundToStep(float val, float step) =>
+    math.round(val / step) * step
+
+// =============================================================================
+// 3. MATHEMATICAL VOLATILITY ENGINE (EXPECTED MOVE & STRIKE CORRIDORS)
+// =============================================================================
+// Log returns & 20-period Close-to-Close Annualized Historical Volatility
+logReturn = math.log(close / nz(close[1], close))
+hv20Raw   = ta.stdev(logReturn, 20) * math.sqrt(365.0) * 100.0
+hv20      = nz(hv20Raw, 50.0)
+
+// Volatility Percentile Rank (Past 90 bars)
+highestHv = ta.highest(hv20, 90)
+lowestHv  = ta.lowest(hv20, 90)
+volRank   = highestHv > lowestHv ? ((hv20 - lowestHv) / (highestHv - lowestHv)) * 100.0 : 50.0
+
+// Effective Implied Volatility
+effectiveIv = useAutoHv ? (hv20 * ivPremiumRatio) : customIvInput
+
+// Expected Move formula: EM = Spot * (IV / 100) * sqrt(DTE / 365)
+expectedMove = close * (effectiveIv / 100.0) * math.sqrt(dteDays / 365.0)
+
+// Wings & Strike Placement
+wingAbsolute = (close * (wingWidthPct / 100.0))
+
+rawShortCall = close + (expectedMove * shortStrikeMult)
+rawShortPut  = close - (expectedMove * shortStrikeMult)
+
+shortCallStrike = roundToStep(rawShortCall, strikeStep)
+shortPutStrike  = roundToStep(rawShortPut, strikeStep)
+longCallStrike  = roundToStep(shortCallStrike + wingAbsolute, strikeStep)
+longPutStrike   = roundToStep(shortPutStrike - wingAbsolute, strikeStep)
+
+// Actual effective wing width & estimated net credit
+actualCallSpreadWidth = longCallStrike - shortCallStrike
+actualPutSpreadWidth  = shortPutStrike - longPutStrike
+avgWingWidth          = (actualCallSpreadWidth + actualPutSpreadWidth) / 2.0
+estimatedCredit       = avgWingWidth * creditRatio
+
+// Breakeven Points
+upperBreakeven = shortCallStrike + estimatedCredit
+lowerBreakeven = shortPutStrike - estimatedCredit
+
+// Maximum Risk and Return Profile
+maxProfit     = estimatedCredit
+maxLoss       = avgWingWidth - estimatedCredit
+riskReward    = maxLoss > 0 ? (maxProfit / maxLoss) * 100.0 : 0.0
+// Probability of Profit (POP) approximation based on normal distribution coverage of breakevens
+popEstimate   = math.min(math.max(100.0 - (2.0 * (100.0 - (100.0 * math.min(1.0, (shortCallStrike - close) / (expectedMove > 0 ? expectedMove : 1.0) * 0.4 + 0.5)))), 50.0), 92.0)
+
+// =============================================================================
+// 4. REGIME & CHOP DETECTION (ENTRY VALIDATION)
+// =============================================================================
+// ADX Calculation
+[diPlus, diMinus, adxVal] = ta.dmi(14, 14)
+adxOk = not useAdxFilter or (adxVal <= adxThreshold)
+
+// Dreiss Choppiness Index
+atrSum14 = math.sum(ta.tr, 14)
+range14  = ta.highest(high, 14) - ta.lowest(low, 14)
+chopIndex = range14 > 0 ? 100.0 * (math.log10(atrSum14 / range14) / math.log10(14)) : 50.0
+chopOk = not useChopFilter or (chopIndex >= chopThreshold)
+
+// Volatility Rank Filter
+volRankOk = not useIvRankFilter or (volRank >= minVolRank)
+
+// Overall Entry Condition: Non-trending, consolidating, healthy volatility to harvest
+ironCondorIdealSetup = adxOk and chopOk and volRankOk
+dangerTrendBreakout  = not adxOk or not chopOk
+
+// =============================================================================
+// 5. CYCLE SIMULATION & REAL-TIME TRACKING
+// =============================================================================
+// Approximate bar length for DTE on daily or intraday charts
+int barsInDte = math.max(1, math.round(dteDays * (timeframe.isdaily ? 1 : (timeframe.isminutes ? (1440 / (timeframe.multiplier > 0 ? timeframe.multiplier : 60)) : 1))))
+
+var int cycleStartBar = 0
+var float cycleEntryPrice = na
+var float cycleShortCall = na
+var float cycleShortPut = na
+var float cycleLongCall = na
+var float cycleLongPut = na
+var float cycleUpperBE = na
+var float cycleLowerBE = na
+var float cycleCredit = na
+var float cycleMaxLoss = na
+var bool cycleActive = false
+
+var int totalTrades = 0
+var int winTrades = 0
+var int lossTrades = 0
+var float cumulativePnL = 0.0
+
+// Trigger new simulated cycle when previous expires or at beginning
+newCycleTrigger = (bar_index - cycleStartBar >= barsInDte or not cycleActive) and ironCondorIdealSetup
+
+if newCycleTrigger and bar_index > 30
+    // Settle prior cycle if active
+    if cycleActive
+        totalTrades += 1
+        bool expiredInProfit = (close <= cycleShortCall and close >= cycleShortPut)
+        bool breachedMaxLoss = (close >= cycleLongCall or close <= cycleLongPut)
+        
+        if expiredInProfit
+            winTrades += 1
+            cumulativePnL += cycleCredit
+        else if breachedMaxLoss
+            lossTrades += 1
+            cumulativePnL -= cycleMaxLoss
+        else
+            // Partial loss between short strike and wing
+            float partialLoss = close > cycleShortCall ? (close - cycleShortCall) - cycleCredit : (cycleShortPut - close) - cycleCredit
+            if partialLoss <= 0
+                winTrades += 1
+                cumulativePnL += math.abs(partialLoss)
+            else
+                lossTrades += 1
+                cumulativePnL -= partialLoss
+
+    // Initialize new cycle
+    cycleStartBar   := bar_index
+    cycleEntryPrice := close
+    cycleShortCall  := shortCallStrike
+    cycleShortPut   := shortPutStrike
+    cycleLongCall   := longCallStrike
+    cycleLongPut    := longPutStrike
+    cycleUpperBE    := upperBreakeven
+    cycleLowerBE    := lowerBreakeven
+    cycleCredit     := estimatedCredit
+    cycleMaxLoss    := maxLoss
+    cycleActive     := true
+
+// Calculate current cycle status
+bool priceAboveShortCall = cycleActive and close > cycleShortCall
+bool priceBelowShortPut  = cycleActive and close < cycleShortPut
+bool priceInsideSweetSpot = cycleActive and close <= cycleShortCall and close >= cycleShortPut
+
+// =============================================================================
+// 6. VISUAL PLOTTING (STRIKES, WINGS & CORRIDOR)
+// =============================================================================
+// Plot Dynamic Current Strikes
+pLongCall  = plot(showZones ? longCallStrike : na,  "Upper Long Wing (Protection)", color=color.new(color.red, 30), style=plot.style_line, linewidth=1)
+pShortCall = plot(showZones ? shortCallStrike : na, "Short Call Strike (Sell)",       color=color.new(color.orange, 10), style=plot.style_line, linewidth=2)
+pUpperBE   = plot(showBreakevens ? upperBreakeven : na, "Upper Breakeven",            color=color.new(color.yellow, 30), style=plot.style_circles, linewidth=1)
+
+pLowerBE   = plot(showBreakevens ? lowerBreakeven : na, "Lower Breakeven",            color=color.new(color.yellow, 30), style=plot.style_circles, linewidth=1)
+pShortPut  = plot(showZones ? shortPutStrike : na,  "Short Put Strike (Sell)",        color=color.new(color.teal, 10), style=plot.style_line, linewidth=2)
+pLongPut   = plot(showZones ? longPutStrike : na,   "Lower Long Wing (Protection)",  color=color.new(color.red, 30), style=plot.style_line, linewidth=1)
+
+// Shaded Fill: Max Profit Zone (Between Short Call and Short Put)
+fill(pShortCall, pShortPut, color=color.new(color.green, 92), title="Max Profit Corridor")
+// Shaded Wings: Tail Risk Danger Zones
+fill(pLongCall, pShortCall, color=color.new(color.red, 90), title="Call Wing Risk Zone")
+fill(pShortPut, pLongPut,  color=color.new(color.red, 90), title="Put Wing Risk Zone")
+
+// Active Breached Warnings
+plotshape(ta.crossover(close, shortCallStrike), "Call Strike Breached", shape.labeldown, location.abovebar, color.red, text="CALL DANGER", textcolor=color.white, size=size.small)
+plotshape(ta.crossunder(close, shortPutStrike),  "Put Strike Breached",  shape.labelup,   location.belowbar, color.red, text="PUT DANGER",  textcolor=color.white, size=size.small)
+plotshape(newCycleTrigger and ironCondorIdealSetup, "New Iron Condor Setup", shape.diamond, location.belowbar, color.green, text="IC SETUP", textcolor=color.white, size=size.small)
+
+// =============================================================================
+// 7. INSTITUTIONAL HUD DASHBOARD
+// =============================================================================
+dashPosition = dashLocation == "Bottom Right" ? position.bottom_right :
+               dashLocation == "Top Left" ? position.top_left :
+               dashLocation == "Bottom Left" ? position.bottom_left : position.top_right
+
+var table hud = table.new(dashPosition, 2, 11, bgcolor=color.new(#0e1626, 10), border_color=color.new(#2a3b5c, 30), border_width=1)
+
+if barstate.islast and showDashboard
+    // Header
+    table.cell(hud, 0, 0, "🦅 NEXVORA IRON CONDOR", bgcolor=#1b2a4a, text_color=color.white, text_size=size.small)
+    table.cell(hud, 1, 0, detectedAsset + " (" + str.tostring(dteDays) + " DTE)", bgcolor=#1b2a4a, text_color=color.yellow, text_size=size.small)
+    
+    // Market Regime
+    string regimeText = dangerTrendBreakout ? "TREND / UNFAVORABLE" : "CHOP / FAVORABLE"
+    color  regimeCol  = dangerTrendBreakout ? color.red : color.green
+    table.cell(hud, 0, 1, "Market Regime", text_color=color.silver, text_size=size.small)
+    table.cell(hud, 1, 1, regimeText, bgcolor=color.new(regimeCol, 80), text_color=regimeCol, text_size=size.small)
+    
+    // Volatility Metrics
+    table.cell(hud, 0, 2, "Historical Vol / Rank", text_color=color.silver, text_size=size.small)
+    table.cell(hud, 1, 2, str.tostring(hv20, "#.1") + "% | " + str.tostring(volRank, "#.0") + "%ile", text_color=color.white, text_size=size.small)
+    
+    // Expected Move
+    table.cell(hud, 0, 3, "Expected Move (±1 SD)", text_color=color.silver, text_size=size.small)
+    table.cell(hud, 1, 3, "±$" + str.tostring(expectedMove, "#.1") + " (" + str.tostring((expectedMove/close)*100.0, "#.1") + "%)", text_color=color.aqua, text_size=size.small)
+    
+    // Call Strikes
+    table.cell(hud, 0, 4, "Call Wing / Short Call", text_color=color.silver, text_size=size.small)
+    table.cell(hud, 1, 4, "$" + str.tostring(longCallStrike, "#.0") + " / $" + str.tostring(shortCallStrike, "#.0"), text_color=#ff7b72, text_size=size.small)
+    
+    // Put Strikes
+    table.cell(hud, 0, 5, "Short Put / Put Wing", text_color=color.silver, text_size=size.small)
+    table.cell(hud, 1, 5, "$" + str.tostring(shortPutStrike, "#.0") + " / $" + str.tostring(longPutStrike, "#.0"), text_color=#56d364, text_size=size.small)
+    
+    // Breakeven Range
+    table.cell(hud, 0, 6, "Safe Breakeven Band", text_color=color.silver, text_size=size.small)
+    table.cell(hud, 1, 6, "$" + str.tostring(lowerBreakeven, "#.0") + " - $" + str.tostring(upperBreakeven, "#.0"), text_color=color.yellow, text_size=size.small)
+    
+    // Estimated Net Credit & R:R
+    table.cell(hud, 0, 7, "Net Credit / Max Loss", text_color=color.silver, text_size=size.small)
+    table.cell(hud, 1, 7, "$" + str.tostring(estimatedCredit, "#.1") + " / $" + str.tostring(maxLoss, "#.1"), text_color=color.white, text_size=size.small)
+    
+    // Pop Estimate
+    table.cell(hud, 0, 8, "Est. Win Probability", text_color=color.silver, text_size=size.small)
+    table.cell(hud, 1, 8, str.tostring(popEstimate, "#.1") + "% POP", text_color=color.green, text_size=size.small)
+    
+    // Active Corridor Status
+    string statusText = priceInsideSweetSpot ? "IN SWEET SPOT" : (priceAboveShortCall ? "CALL BREACHED" : (priceBelowShortPut ? "PUT BREACHED" : "NEUTRAL"))
+    color statusCol = priceInsideSweetSpot ? color.green : color.red
+    table.cell(hud, 0, 9, "Current State", text_color=color.silver, text_size=size.small)
+    table.cell(hud, 1, 9, statusText, bgcolor=color.new(statusCol, 80), text_color=statusCol, text_size=size.small)
+    
+    // Backtest Tracker
+    float winRate = totalTrades > 0 ? (winTrades / totalTrades) * 100.0 : 0.0
+    table.cell(hud, 0, 10, "Sim. Win Rate (PnL)", text_color=color.silver, text_size=size.small)
+    table.cell(hud, 1, 10, str.tostring(winRate, "#.1") + "% (" + str.tostring(totalTrades) + " Trds | " + (cumulativePnL >= 0 ? "+$" : "-$") + str.tostring(math.abs(cumulativePnL), "#.0") + ")", text_color=cumulativePnL >= 0 ? color.green : color.red, text_size=size.small)
+
+// =============================================================================
+// 8. ALERTS
+// =============================================================================
+alertcondition(newCycleTrigger and ironCondorIdealSetup, "Iron Condor Entry Setup", "Nexvora IC: Favorable non-trending conditions detected. Safe to sell Iron Condor!")
+alertcondition(ta.crossover(close, shortCallStrike), "Upper Short Call Breached", "Nexvora IC WARNING: Price has crossed above Short Call strike! Prepare defensive adjustment.")
+alertcondition(ta.crossunder(close, shortPutStrike), "Lower Short Put Breached", "Nexvora IC WARNING: Price has crossed below Short Put strike! Prepare defensive adjustment.")
+alertcondition(ta.crossover(close, upperBreakeven) or ta.crossunder(close, lowerBreakeven), "Breakeven Exceeded", "Nexvora IC CRITICAL: Price has breached the breakeven band!")

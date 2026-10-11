@@ -1,0 +1,6 @@
+{
+  "name": "Crypto Live Market & Auto-Sell",
+  "description": "Real-time cryptocurrency market exchange dashboard with live WebSocket prices, depth order book, automated stop-loss and take-profit auto-sell engine, and 24/7 autonomous Delta AutoTrader system.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

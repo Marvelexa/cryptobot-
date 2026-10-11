@@ -1,0 +1,368 @@
+//@version=6
+strategy("Nexvora Multi-Asset Iron Condor Band Sniper [PRO EDITION]", shorttitle="NEX-CONDOR-PRO", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, initial_capital=176, default_qty_type=strategy.percent_of_equity, default_qty_value=550, margin_long=10, margin_short=10, pyramiding=0, currency=currency.USD)
+
+// =============================================================================
+// NEXVORA MULTI-ASSET IRON CONDOR BAND SNIPER [PRO EDITION]
+// Assets Supported: BTC, ETH, XAUT (Tether Gold) & Major Crypto/Commodities
+// =============================================================================
+// Features:
+// 1. NATIVE TRADINGVIEW STRATEGY TESTER INTEGRATION:
+//    - Automatically displays Strategy Tester Key Stats (Total PnL, Drawdown,
+//      Profitable Trades % / Win Rate, Performance Summary, and List of Trades).
+//    - Initial Capital: $176 USD (Matching Nexvora Pro Standard).
+// 2. DUAL-HORIZON IRON CONDOR MEAN-REVERSION CORRIDOR:
+//    - Short Put Floor (Bull Put Wing): Buys oversold dips at the lower strike boundary.
+//    - Short Call Ceiling (Bear Call Wing): Sells overbought peaks at the upper strike boundary.
+//    - Target: Mean Reversion to Neutral Sweet Spot (Maximum Profit Zone).
+// 3. STATISTICAL EXPECTED MOVE (EM) & WING STRIKE ENGINE:
+//    - Dynamic Expected Move: EM = Spot * (IV / 100) * sqrt(DTE / 365).
+//    - Automatically calculates Long Call, Short Call, Short Put, and Long Put wings.
+// 4. INSTITUTIONAL RISK GUARDS:
+//    - Dynamic Break-Even (0.80 ATR) + Micro-Trailing Stop (0.85 ATR).
+//    - Anti-Trend Waterfall Filter (Choppiness Index + ADX Guard).
+//    - Dedicated HUD Dashboard matching Nexvora PRO layout.
+// =============================================================================
+
+// =============================================================================
+// 1. INPUT CONFIGURATIONS
+// =============================================================================
+grp_asset = "🪙 Asset & Expiry Calibration"
+assetMode   = input.string("AUTO", "Asset Preset", options=["AUTO", "BTC", "ETH", "XAUT", "CUSTOM"], group=grp_asset, tooltip="AUTO detects asset ticker or manually select.")
+dteDays     = input.int(7, "Options Expiry DTE (Days)", minval=1, maxval=60, group=grp_asset, tooltip="7-14 DTE for BTC/ETH, 14-30 DTE for XAUT.")
+
+grp_condor = "🦅 Iron Condor Geometry & Volatility"
+useAutoHv       = input.bool(true,  "Auto-Calculate Volatility from HV", group=grp_condor)
+manualIv        = input.float(55.0, "Manual IV (%) [If Auto-HV disabled]", minval=5.0, maxval=200.0, group=grp_condor)
+ivPremiumRatio  = input.float(1.15, "IV / HV Premium Multiplier", minval=0.8, maxval=2.0, step=0.05, group=grp_condor)
+shortStrikeMult = input.float(1.10, "Short Strike Distance (x Expected Move)", minval=0.6, maxval=2.5, step=0.05, group=grp_condor)
+wingWidthPct    = input.float(4.5,  "Long Wing Protection Width (%)", minval=0.5, maxval=15.0, step=0.5, group=grp_condor)
+
+grp_mom = "⚡ Quantum Momentum Engine"
+fastLength       = input.int(8,     "Fast Momentum Length", minval=1, group=grp_mom)
+slowLength       = input.int(21,    "Slow Momentum Length", minval=1, group=grp_mom)
+signalLength     = input.int(9,     "Signal Smoothing Length", minval=1, group=grp_mom)
+accelSens        = input.float(1.5, "Acceleration Multiplier", minval=0.5, step=0.1, group=grp_mom)
+extremeThreshold = input.int(35,    "Extreme Reversal Zone (OS/OB)", minval=15, maxval=50, group=grp_mom)
+
+grp_shield = "🛡️ Anti-Trend & Institutional Shields"
+useTrendFilter   = input.bool(true,  "Enable Trend Alignment Guard", group=grp_shield)
+trendLen         = input.int(100,    "Trend EMA Length", minval=20, maxval=200, group=grp_shield)
+useChopFilter    = input.bool(true,  "Enable Anti-Chop / Breakout Shield", group=grp_shield)
+chopThreshold    = input.float(48.0, "Choppiness Index Threshold", minval=38.0, maxval=65.0, step=0.5, group=grp_shield)
+useWickShield    = input.bool(true,  "Enable VSA Wick Absorption Gate", group=grp_shield)
+minWickRatio     = input.float(0.18, "Minimum Rejection Wick Ratio", minval=0.05, maxval=0.50, step=0.05, group=grp_shield)
+
+grp_be = "🛡️ Dynamic Break-Even & Profit Lock"
+useBreakEven     = input.bool(true,  "Enable Break-Even Protection", group=grp_be)
+breakEvenTrigger = input.float(0.80, "Break-Even Trigger (x ATR)", minval=0.4, maxval=1.5, step=0.05, group=grp_be)
+breakEvenBuffer  = input.float(0.05, "Break-Even Buffer (x ATR)", minval=0.0, maxval=0.2, step=0.01, group=grp_be)
+
+grp_trail = "🏃 Micro-Trailing Stop"
+useTrailingStop  = input.bool(true,  "Enable Micro-Trailing Stop", group=grp_trail)
+trailTrigger     = input.float(0.85, "Trailing Activation Distance (x ATR)", minval=0.5, maxval=2.0, step=0.05, group=grp_trail)
+trailOffset      = input.float(0.50, "Trailing Step Distance (x ATR)", minval=0.2, maxval=1.5, step=0.05, group=grp_trail)
+
+grp_risk = "🎯 Target & Trade Management"
+targetMult       = input.float(1.50, "Target (TP) Distance (x ATR)", minval=0.5, maxval=3.0, step=0.05, group=grp_risk)
+slMult           = input.float(2.20, "Stop Loss Distance (x ATR)", minval=0.5, maxval=4.0, step=0.05, group=grp_risk)
+useMaxSlCap      = input.bool(true,  "Enable Maximum SL ATR Ceiling", group=grp_risk)
+maxSlAtrCap      = input.float(2.60, "Maximum SL Distance (x ATR)", minval=1.0, maxval=4.0, step=0.05, group=grp_risk)
+swingBars        = input.int(5,      "Swing Wick Lookback (Bars)", minval=2, maxval=10, group=grp_risk)
+cooldownBars     = input.int(1,      "Cooldown After TP (Bars)", minval=0, maxval=10, group=grp_risk)
+lossCooldownBars = input.int(3,      "Cooldown After Stop Loss (Bars)", minval=1, maxval=10, group=grp_risk)
+
+// =============================================================================
+// 2. ASSET DETECTION & PARAMETER TUNING
+// =============================================================================
+tickerStr = syminfo.ticker
+detectedAsset = assetMode
+
+if assetMode == "AUTO"
+    if str.contains(tickerStr, "BTC") or str.contains(tickerStr, "XBT")
+        detectedAsset := "BTC"
+    else if str.contains(tickerStr, "ETH")
+        detectedAsset := "ETH"
+    else if str.contains(tickerStr, "XAU") or str.contains(tickerStr, "GOLD") or str.contains(tickerStr, "PAXG")
+        detectedAsset := "XAUT"
+    else
+        detectedAsset := "CUSTOM"
+
+float strikeStep = 100.0
+if detectedAsset == "BTC"
+    strikeStep := 500.0
+else if detectedAsset == "ETH"
+    strikeStep := 25.0
+else if detectedAsset == "XAUT"
+    strikeStep := 10.0
+else
+    strikeStep := close > 5000.0 ? 100.0 : (close > 500.0 ? 10.0 : 1.0)
+
+roundToStep(float val, float step) =>
+    math.round(val / step) * step
+
+// =============================================================================
+// 3. CORE MATHEMATICS & VOLATILITY CORRIDOR
+// =============================================================================
+atr = ta.atr(14)
+safeAtr = atr > 0 ? atr : (close * 0.015)
+
+// Historical Volatility & Expected Move
+logReturn = math.log(close / nz(close[1], close))
+hv20Raw   = ta.stdev(logReturn, 20) * math.sqrt(365.0) * 100.0
+hv20      = nz(hv20Raw, 45.0)
+effectiveIv = useAutoHv ? (hv20 * ivPremiumRatio) : manualIv
+expectedMove = close * (effectiveIv / 100.0) * math.sqrt(dteDays / 365.0)
+
+// Strike Calculations
+wingDist = close * (wingWidthPct / 100.0)
+shortCallStrike = roundToStep(close + (expectedMove * shortStrikeMult), strikeStep)
+shortPutStrike  = roundToStep(close - (expectedMove * shortStrikeMult), strikeStep)
+longCallStrike  = roundToStep(shortCallStrike + wingDist, strikeStep)
+longPutStrike   = roundToStep(shortPutStrike - wingDist, strikeStep)
+
+// Estimated Breakevens
+estimatedCredit = (wingDist * 0.25)
+upperBreakeven  = shortCallStrike + estimatedCredit
+lowerBreakeven  = shortPutStrike - estimatedCredit
+
+// Zero-Lag Exponential Moving Average Momentum
+calcZLEMA(src, len) =>
+    lag = math.floor((len - 1) / 2)
+    ta.ema(src + (src - src[lag]), len)
+
+fastZ = calcZLEMA(close, fastLength)
+slowZ = calcZLEMA(close, slowLength)
+vel   = fastZ - slowZ
+acc   = (vel - nz(vel[1])) * accelSens
+wave  = ta.ema(vel + acc, 3)
+sig   = ta.ema(wave, signalLength)
+
+normH = ta.highest(math.abs(wave), 100)
+normEma = ta.ema(normH, 20)
+scale = normEma > 0 ? 100.0 / normEma : 1.0
+scaledWave = wave * scale
+
+// Trend & Chop Filter
+trendEma  = ta.ema(close, trendLen)
+trendUp   = close >= trendEma
+trendDown = close <= trendEma
+
+atrSum14  = math.sum(ta.tr, 14)
+range14   = ta.highest(high, 14) - ta.lowest(low, 14)
+chopIndex = range14 > 0 ? 100.0 * (math.log10(atrSum14 / range14) / math.log10(14)) : 50.0
+isChopOk  = not useChopFilter or (chopIndex >= chopThreshold)
+
+// Candlestick Confirmation Gate
+candleRange = high - low
+candleBody  = math.abs(close - open)
+lowerWick   = math.min(open, close) - low
+upperWick   = high - math.max(open, close)
+
+bullWickOk = not useWickShield or (candleRange > 0 and (lowerWick / candleRange) >= minWickRatio)
+bearWickOk = not useWickShield or (candleRange > 0 and (upperWick / candleRange) >= minWickRatio)
+
+// Fast Momentum Extreme Triggers (Rebound from Short Strikes)
+isOversoldExtreme  = scaledWave <= -extremeThreshold
+isOverboughtExtreme = scaledWave >= extremeThreshold
+
+var int buyArmedBar  = -100
+var int sellArmedBar = -100
+
+if isOversoldExtreme
+    buyArmedBar := bar_index
+
+if isOverboughtExtreme
+    sellArmedBar := bar_index
+
+bool buyArmedActive  = (bar_index - buyArmedBar) <= 4
+bool sellArmedActive = (bar_index - sellArmedBar) <= 4
+
+bool isBullReversal = close > open and (ta.crossover(scaledWave, -extremeThreshold) or (buyArmedActive and bullWickOk))
+bool isBearReversal = close < open and (ta.crossunder(scaledWave, extremeThreshold) or (sellArmedActive and bearWickOk))
+
+// Final Confirmation
+bool isBigBuySetup  = isBullReversal and (not useTrendFilter or trendUp) and isChopOk
+bool isBigSellSetup = isBearReversal and (not useTrendFilter or trendDown) and isChopOk
+
+// =============================================================================
+// 4. ACTIVE TRADE MANAGEMENT & EXECUTION ENGINE
+// =============================================================================
+var int   activeTrade   = 0
+var int   entryBar      = 0
+var float frozenEntry   = na
+var float frozenTP      = na
+var float frozenSL      = na
+var bool  beLocked      = false
+var int   lastExitBar   = -100
+var string tradeOutcome = "NONE"
+var int   lastTradeType = 0
+
+// Manage Long Trades
+if activeTrade == 1 and bar_index > entryBar
+    if useBreakEven and not beLocked and (high >= frozenEntry + (safeAtr * breakEvenTrigger))
+        frozenSL := math.max(frozenSL, frozenEntry + (safeAtr * breakEvenBuffer))
+        beLocked := true
+        
+    if useTrailingStop and (high >= frozenEntry + (safeAtr * trailTrigger))
+        float trailSL = high - (safeAtr * trailOffset)
+        frozenSL := math.max(frozenSL, trailSL)
+        
+    strategy.exit("TP/SL BUY", from_entry="BUY", limit=frozenTP, stop=frozenSL, comment_profit="🎯 TP HIT", comment_loss=beLocked ? "🛡️ LOCK EXIT" : "🛑 SL HIT")
+        
+    if high >= frozenTP
+        activeTrade  := 0
+        lastExitBar  := bar_index
+        tradeOutcome := "TP_HIT"
+        beLocked     := false
+        frozenEntry  := na
+        frozenTP     := na
+        frozenSL     := na
+    else if low <= frozenSL
+        activeTrade  := 0
+        lastExitBar  := bar_index
+        tradeOutcome := beLocked ? "BE_EXIT" : "SL_HIT"
+        beLocked     := false
+        frozenEntry  := na
+        frozenTP     := na
+        frozenSL     := na
+
+// Manage Short Trades
+else if activeTrade == -1 and bar_index > entryBar
+    if useBreakEven and not beLocked and (low <= frozenEntry - (safeAtr * breakEvenTrigger))
+        frozenSL := math.min(frozenSL, frozenEntry - (safeAtr * breakEvenBuffer))
+        beLocked := true
+        
+    if useTrailingStop and (low <= frozenEntry - (safeAtr * trailTrigger))
+        float trailSL = low + (safeAtr * trailOffset)
+        frozenSL := math.min(frozenSL, trailSL)
+        
+    strategy.exit("TP/SL SELL", from_entry="SELL", limit=frozenTP, stop=frozenSL, comment_profit="🎯 TP HIT", comment_loss=beLocked ? "🛡️ LOCK EXIT" : "🛑 SL HIT")
+        
+    if low <= frozenTP
+        activeTrade  := 0
+        lastExitBar  := bar_index
+        tradeOutcome := "TP_HIT"
+        beLocked     := false
+        frozenEntry  := na
+        frozenTP     := na
+        frozenSL     := na
+    else if high >= frozenSL
+        activeTrade  := 0
+        lastExitBar  := bar_index
+        tradeOutcome := beLocked ? "BE_EXIT" : "SL_HIT"
+        beLocked     := false
+        frozenEntry  := na
+        frozenTP     := na
+        frozenSL     := na
+
+// Cooldown Management
+int requiredCooldown = (tradeOutcome == "SL_HIT") ? lossCooldownBars : cooldownBars
+bool cooldownPassed  = (bar_index - lastExitBar) >= requiredCooldown
+bool justExited      = (lastExitBar == bar_index)
+
+bool newBuyLocked  = false
+bool newSellLocked = false
+
+// Execute New Orders
+if activeTrade == 0 and cooldownPassed and (not justExited) and (strategy.position_size == 0)
+    canBuy  = isBigBuySetup  and not (tradeOutcome == "SL_HIT" and lastTradeType == 1  and (bar_index - lastExitBar) < lossCooldownBars)
+    canSell = isBigSellSetup and not (tradeOutcome == "SL_HIT" and lastTradeType == -1 and (bar_index - lastExitBar) < lossCooldownBars)
+    
+    if canBuy
+        buyArmedBar   := -100
+        activeTrade   := 1
+        entryBar      := bar_index
+        frozenEntry   := close
+        frozenTP      := close + (safeAtr * targetMult)
+        
+        float swingLow = ta.lowest(low, swingBars)
+        float baseSL   = math.min(close - (safeAtr * slMult), swingLow - (safeAtr * 0.40))
+        if useMaxSlCap
+            baseSL := math.max(close - (safeAtr * maxSlAtrCap), baseSL)
+            
+        frozenSL      := baseSL
+        newBuyLocked  := true
+        tradeOutcome  := "IN_TRADE"
+        lastTradeType := 1
+        beLocked      := false
+        
+        strategy.entry("BUY", strategy.long, comment="🦅 CONDOR LONG")
+        strategy.exit("TP/SL BUY", from_entry="BUY", limit=frozenTP, stop=frozenSL, comment_profit="🎯 TP HIT", comment_loss="🛑 SL HIT")
+        
+    else if canSell
+        sellArmedBar  := -100
+        activeTrade   := -1
+        entryBar      := bar_index
+        frozenEntry   := close
+        frozenTP      := close - (safeAtr * targetMult)
+        
+        float swingHigh = ta.highest(high, swingBars)
+        float baseSL    = math.max(close + (safeAtr * slMult), swingHigh + (safeAtr * 0.40))
+        if useMaxSlCap
+            baseSL := math.min(close + (safeAtr * maxSlAtrCap), baseSL)
+            
+        frozenSL      := baseSL
+        newSellLocked := true
+        tradeOutcome  := "IN_TRADE"
+        lastTradeType := -1
+        beLocked      := false
+        
+        strategy.entry("SELL", strategy.short, comment="🦅 CONDOR SHORT")
+        strategy.exit("TP/SL SELL", from_entry="SELL", limit=frozenTP, stop=frozenSL, comment_profit="🎯 TP HIT", comment_loss="🛑 SL HIT")
+
+// =============================================================================
+// 5. ON-CHART VISUALS (IRON CONDOR CORRIDOR & WINGS)
+// =============================================================================
+pLongCall  = plot(longCallStrike,  "Upper Long Call (Wing)",  color=color.new(color.red, 35),   style=plot.style_line, linewidth=1)
+pShortCall = plot(shortCallStrike, "Short Call Strike",        color=color.new(color.orange, 15), style=plot.style_line, linewidth=2)
+pUpperBE   = plot(upperBreakeven,  "Upper Breakeven",          color=color.new(color.yellow, 40), style=plot.style_circles, linewidth=1)
+
+pLowerBE   = plot(lowerBreakeven,  "Lower Breakeven",          color=color.new(color.yellow, 40), style=plot.style_circles, linewidth=1)
+pShortPut  = plot(shortPutStrike,  "Short Put Strike",         color=color.new(color.teal, 15),   style=plot.style_line, linewidth=2)
+pLongPut   = plot(longPutStrike,   "Lower Long Put (Wing)",   color=color.new(color.red, 35),   style=plot.style_line, linewidth=1)
+
+// Shaded Corridors
+fill(pShortCall, pShortPut, color=color.new(color.green, 93), title="Max Profit Corridor")
+fill(pLongCall, pShortCall, color=color.new(color.red, 92),   title="Call Wing Risk Zone")
+fill(pShortPut, pLongPut,  color=color.new(color.red, 92),   title="Put Wing Risk Zone")
+
+plot(useTrendFilter ? trendEma : na, "Trend EMA (100)", color=#388bfd, linewidth=1)
+
+plotshape(newBuyLocked,  title="BUY Signal",  style=shape.labelup,   location=location.belowbar, color=#00E676, size=size.normal, text="BUY",  textcolor=color.black)
+plotshape(newSellLocked, title="SELL Signal", style=shape.labeldown, location=location.abovebar, color=#FF1744, size=size.normal, text="SELL", textcolor=color.white)
+
+// =============================================================================
+// 6. DEDICATED INSTITUTIONAL CONDOR HUD (BOTTOM-RIGHT)
+// =============================================================================
+var table condorHud = table.new(position.bottom_right, 2, 7, bgcolor=color.new(#131722, 10), border_color=color.new(#388bfd, 40), border_width=1)
+
+if barstate.islast
+    table.cell(condorHud, 0, 0, "SYSTEM", bgcolor=#1E222D, text_color=color.gray, text_size=size.small)
+    table.cell(condorHud, 1, 0, detectedAsset + " CONDOR PRO", bgcolor=#1E222D, text_color=#388bfd, text_size=size.small)
+    
+    string winRateTxt = str.tostring(strategy.wintrades + strategy.losstrades > 0 ? (strategy.wintrades * 100.0 / (strategy.wintrades + strategy.losstrades)) : 0.0, "#.#") + "% (" + str.tostring(strategy.closedtrades) + " trades)"
+    table.cell(condorHud, 0, 1, "WIN RATE", bgcolor=#1E222D, text_color=color.gray, text_size=size.small)
+    table.cell(condorHud, 1, 1, winRateTxt, bgcolor=#1E222D, text_color=#00E676, text_size=size.small)
+    
+    string netProfitTxt = (strategy.netprofit >= 0 ? "+$" : "-$") + str.tostring(math.abs(strategy.netprofit), "#.##")
+    color netCol = strategy.netprofit >= 0 ? #00E676 : #FF1744
+    table.cell(condorHud, 0, 2, "NET PROFIT", bgcolor=#1E222D, text_color=color.gray, text_size=size.small)
+    table.cell(condorHud, 1, 2, netProfitTxt, bgcolor=#1E222D, text_color=netCol, text_size=size.small)
+    
+    string statusTxt = activeTrade == 1 ? (beLocked ? "LONG [LOCKED]" : "LONG [TP HUNT]") : (activeTrade == -1 ? (beLocked ? "SHORT [LOCKED]" : "SHORT [TP HUNT]") : (chopIndex < chopThreshold ? "TREND BLOCKED" : "CONDOR READY"))
+    color statusCol  = activeTrade == 1 ? #00E676 : (activeTrade == -1 ? #FF1744 : (chopIndex < chopThreshold ? #FF9100 : #388bfd))
+    table.cell(condorHud, 0, 3, "AI STATUS", bgcolor=#1E222D, text_color=color.gray, text_size=size.small)
+    table.cell(condorHud, 1, 3, statusTxt, bgcolor=#1E222D, text_color=statusCol, text_size=size.small)
+    
+    table.cell(condorHud, 0, 4, "TARGET (TP)", bgcolor=#1E222D, text_color=color.gray, text_size=size.small)
+    table.cell(condorHud, 1, 4, str.tostring(targetMult, "#.##") + "x ATR (" + (activeTrade != 0 ? str.tostring(frozenTP, "#.##") : "FLAT") + ")", bgcolor=#1E222D, text_color=#00E676, text_size=size.small)
+    
+    table.cell(condorHud, 0, 5, "STOP LOSS (SL)", bgcolor=#1E222D, text_color=color.gray, text_size=size.small)
+    table.cell(condorHud, 1, 5, str.tostring(slMult, "#.##") + "x ATR (" + (activeTrade != 0 ? str.tostring(frozenSL, "#.##") : "SAFE") + ")", bgcolor=#1E222D, text_color=#FF1744, text_size=size.small)
+
+    table.cell(condorHud, 0, 6, "PROFIT GUARD", bgcolor=#1E222D, text_color=color.gray, text_size=size.small)
+    table.cell(condorHud, 1, 6, beLocked ? "BE LOCKED" : (useTrailingStop ? "TRAILING ACTIVE" : "ARMED"), bgcolor=#1E222D, text_color=beLocked ? #00E676 : #FFD600, text_size=size.small)
+
+// Alerts
+alertcondition(newBuyLocked,  title="[NEX-CONDOR] Confirmed BUY",  message="CONDOR BUY Signal on {{ticker}} at {{close}}")
+alertcondition(newSellLocked, title="[NEX-CONDOR] Confirmed SELL", message="CONDOR SELL Signal on {{ticker}} at {{close}}")
