@@ -765,19 +765,30 @@ export class DeltaAutoTraderEngine {
       const indicatorSide = evalResult?.signal;
       const indicatorQuality = evalResult?.diagnostics?.qualityScore || confluence.confluenceScore;
 
-      const isIndicatorAligned = indicatorSide === mathSide || (
-        mathSide === 'BUY' ? (confluence.isMacroBullish || confluence.allowsLong || confluence.trendDirection === 'BULLISH' || confluence.isRsiBullish || Boolean(confluence.macd?.isBullish))
-                           : (confluence.isMacroBearish || confluence.allowsShort || confluence.trendDirection === 'BEARISH' || confluence.isRsiBearish || Boolean(confluence.macd?.isBearish))
-      );
-
-      // Severe Conflict Guard: Never trade if technical indicators strongly oppose Quant Math
-      const isIndicatorOpposing = (mathSide === 'BUY' && indicatorSide === 'SELL' && indicatorQuality >= 75) ||
-                                  (mathSide === 'SELL' && indicatorSide === 'BUY' && indicatorQuality >= 75);
-
-      if (isIndicatorOpposing) {
-        console.log(`🛡️ [CONFLUENCE GUARD] ${cleanSym} trade blocked: Technical Indicator (${indicatorSide}) strongly opposes Quant Math (${mathSide}). Solo trades deleted!`);
+      // 1. HARD MANDATORY INDICATOR CONFLUENCE GATE:
+      // If technical indicators say BUY (allowsLong / BULLISH trend), NEVER SELL!
+      if (mathSide === 'SELL' && (confluence.allowsLong || !confluence.allowsShort || confluence.trendDirection === 'BULLISH' || confluence.isMacroBullish || indicatorSide === 'BUY')) {
+        console.log(`🛡️ [CONFLUENCE GUARD] ${cleanSym} SELL blocked: Indicator Signal is BULLISH (allowsLong=${confluence.allowsLong}, allowsShort=${confluence.allowsShort}, Trend=${confluence.trendDirection}, Indicator=${indicatorSide || 'NONE'}). Never short when Buy signal is active!`);
         return null;
       }
+
+      // If technical indicators say SELL (allowsShort / BEARISH trend), NEVER BUY!
+      if (mathSide === 'BUY' && (confluence.allowsShort || !confluence.allowsLong || confluence.trendDirection === 'BEARISH' || confluence.isMacroBearish || indicatorSide === 'SELL')) {
+        console.log(`🛡️ [CONFLUENCE GUARD] ${cleanSym} BUY blocked: Indicator Signal is BEARISH (allowsShort=${confluence.allowsShort}, allowsLong=${confluence.allowsLong}, Trend=${confluence.trendDirection}, Indicator=${indicatorSide || 'NONE'}). Never long when Sell signal is active!`);
+        return null;
+      }
+
+      // Indicator Confluence MUST be affirmatively confirmed in the same direction:
+      const isIndicatorConfirmed = mathSide === 'BUY'
+        ? (confluence.allowsLong && (confluence.isMacroBullish || confluence.trendDirection === 'BULLISH' || confluence.isRsiBullish || Boolean(confluence.macd?.isBullish)))
+        : (confluence.allowsShort && (confluence.isMacroBearish || confluence.trendDirection === 'BEARISH' || confluence.isRsiBearish || Boolean(confluence.macd?.isBearish)));
+
+      if (!isIndicatorConfirmed) {
+        console.log(`🛡️ [CONFLUENCE GUARD] ${cleanSym} ${mathSide} blocked: Institutional Indicators do not affirmatively confirm ${mathSide} (allowsLong=${confluence.allowsLong}, allowsShort=${confluence.allowsShort}, Trend=${confluence.trendDirection}). Standing aside.`);
+        return null;
+      }
+
+      const isIndicatorAligned = true;
 
       // 2. Candlestick Anatomy & Price Action Verification
       // Solo candle trades are DELETED. Candle shapes ONLY serve as confirmation/timing!
