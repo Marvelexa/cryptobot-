@@ -446,7 +446,7 @@ export class PriceActionPlaybook2026Engine {
     // In DOWNTREND: Sell rallies into Resistance / EMA50 + Bearish Rejection
     // In UPTREND: Buy pullbacks into Support / EMA50 + Bullish Rejection
     // =========================================================================
-    if (isMacroDowntrend && !hasRecentBlowOffBottom && !isWaterfallPumping) {
+    if (isMacroDowntrend && !hasRecentBlowOffBottom && !isWaterfallPumping && structureData.structure !== 'UPTREND') {
       const isPullbackToResistance = isAtResistance || (Math.abs(currentPrice - ema20) / atr <= 0.75 && currentPrice <= ema20 * 1.01) || (Math.abs(currentPrice - ema50) / atr <= 0.75 && currentPrice <= ema50 * 1.01);
       const isRedCandle = lastBar.close < lastBar.open || lastBar.closePos <= 0.45;
       const isBearishTrigger = isRedCandle && (
@@ -502,7 +502,8 @@ export class PriceActionPlaybook2026Engine {
       const isBearPinBar = lastBar.upperWick >= 1.8 * lastBar.body &&
                            lastBar.upperWick >= 0.45 * lastBar.range &&
                            lastBar.closePos <= 0.50 &&
-                           (isAtResistance || isMacroDowntrend);
+                           (isAtResistance || isMacroDowntrend) &&
+                           structureData.structure !== 'UPTREND';
 
       if (isBullPinBar && structureData.structure !== 'DOWNTREND') {
         triggeredSide = 'BUY';
@@ -512,7 +513,7 @@ export class PriceActionPlaybook2026Engine {
         triggerQuality = 25;
         locationReason = `Testing Key Support Zone ($${nearestSupport.price.toFixed(4)})`;
         triggerReason = `Bullish Pin Bar Rejection (Lower Wick: ${Math.round((lastBar.lowerWick / lastBar.range) * 100)}% of bar)`;
-      } else if (isBearPinBar) {
+      } else if (isBearPinBar && structureData.structure !== 'UPTREND') {
         triggeredSide = 'SELL';
         setupType = 'REJECTION_PIN_BAR';
         regimeAlignment = isMacroDowntrend ? 20 : 18;
@@ -537,7 +538,8 @@ export class PriceActionPlaybook2026Engine {
                               lastBar.close < lastBar.open &&
                               lastBar.close <= (prevBar.open + prevBar.close) / 2 &&
                               lastBar.sizeAtr >= 0.60 &&
-                              (isAtResistance || isMacroDowntrend);
+                              (isAtResistance || isMacroDowntrend) &&
+                              structureData.structure !== 'UPTREND';
 
       if (isBullEngulfing) {
         triggeredSide = 'BUY';
@@ -547,7 +549,7 @@ export class PriceActionPlaybook2026Engine {
         triggerQuality = 25;
         locationReason = `Support Demand Zone ($${nearestSupport.price.toFixed(4)})`;
         triggerReason = `Bullish Engulfing Power Candle (${lastBar.sizeAtr.toFixed(1)} ATR)`;
-      } else if (isBearEngulfing) {
+      } else if (isBearEngulfing && structureData.structure !== 'UPTREND') {
         triggeredSide = 'SELL';
         setupType = 'ENGULFING_AT_LEVEL';
         regimeAlignment = isMacroDowntrend ? 20 : 18;
@@ -635,7 +637,7 @@ export class PriceActionPlaybook2026Engine {
         triggerQuality = 25;
         locationReason = `Liquidity Pool Swept Below Prior Low ($${priorSwingLow.toFixed(4)})`;
         triggerReason = `Bear Trap Rejection Wick (${Math.round((lastBar.lowerWick / lastBar.range) * 100)}% lower wick, RVOL: ${lastBar.rvol.toFixed(2)})`;
-      } else if (isBearSweep) {
+      } else if (isBearSweep && structureData.structure !== 'UPTREND') {
         triggeredSide = 'SELL';
         setupType = 'LIQUIDITY_SWEEP';
         regimeAlignment = 20;
