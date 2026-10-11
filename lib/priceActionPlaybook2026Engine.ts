@@ -498,12 +498,11 @@ export class PriceActionPlaybook2026Engine {
                            lastBar.closePos >= 0.50 &&
                            (isAtSupport || isMacroUptrend);
 
-      // Bearish Pin Bar at Resistance (strictly blocked if structure is UPTREND)
+      // Bearish Pin Bar at Resistance
       const isBearPinBar = lastBar.upperWick >= 1.8 * lastBar.body &&
                            lastBar.upperWick >= 0.45 * lastBar.range &&
                            lastBar.closePos <= 0.50 &&
-                           (isAtResistance || isMacroDowntrend) &&
-                           structureData.structure !== 'UPTREND';
+                           (isAtResistance || isMacroDowntrend);
 
       if (isBullPinBar && structureData.structure !== 'DOWNTREND') {
         triggeredSide = 'BUY';
@@ -513,7 +512,7 @@ export class PriceActionPlaybook2026Engine {
         triggerQuality = 25;
         locationReason = `Testing Key Support Zone ($${nearestSupport.price.toFixed(4)})`;
         triggerReason = `Bullish Pin Bar Rejection (Lower Wick: ${Math.round((lastBar.lowerWick / lastBar.range) * 100)}% of bar)`;
-      } else if (isBearPinBar && structureData.structure !== 'UPTREND') {
+      } else if (isBearPinBar) {
         triggeredSide = 'SELL';
         setupType = 'REJECTION_PIN_BAR';
         regimeAlignment = isMacroDowntrend ? 20 : 18;
@@ -538,8 +537,7 @@ export class PriceActionPlaybook2026Engine {
                               lastBar.close < lastBar.open &&
                               lastBar.close <= (prevBar.open + prevBar.close) / 2 &&
                               lastBar.sizeAtr >= 0.60 &&
-                              (isAtResistance || isMacroDowntrend) &&
-                              structureData.structure !== 'UPTREND';
+                              (isAtResistance || isMacroDowntrend);
 
       if (isBullEngulfing) {
         triggeredSide = 'BUY';
@@ -549,7 +547,7 @@ export class PriceActionPlaybook2026Engine {
         triggerQuality = 25;
         locationReason = `Support Demand Zone ($${nearestSupport.price.toFixed(4)})`;
         triggerReason = `Bullish Engulfing Power Candle (${lastBar.sizeAtr.toFixed(1)} ATR)`;
-      } else if (isBearEngulfing && structureData.structure !== 'UPTREND') {
+      } else if (isBearEngulfing) {
         triggeredSide = 'SELL';
         setupType = 'ENGULFING_AT_LEVEL';
         regimeAlignment = isMacroDowntrend ? 20 : 18;

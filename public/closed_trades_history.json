@@ -1,5 +1,23 @@
 [
   {
+    "id": "trade-1791726525857-d5b2j",
+    "symbol": "SOLUSD",
+    "side": "BUY",
+    "entryPrice": 109.50694405,
+    "exitPrice": 109.42408346,
+    "quantity": 4.5659,
+    "marginUSD": 50.53,
+    "notionalUSD": 1010.6,
+    "pnlUSD": -0.76,
+    "pnlPercent": -1.5,
+    "rMultiple": -0.43,
+    "exitReason": "MANUAL_EXIT",
+    "entryTime": 1791726220677,
+    "exitTime": 1791726525857,
+    "durationMs": 305180,
+    "strategyName": "Reversed (SELL ➔ BUY) [INVERSE MODE]"
+  },
+  {
     "id": "trade-1791726220627-udmnj",
     "symbol": "SOLUSD",
     "side": "SELL",
