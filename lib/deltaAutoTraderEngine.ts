@@ -17,7 +17,6 @@ import { quantMath, QuantMathVerdict } from './quantMathematicalEngine';
 import { priceActionPlaybook, PriceActionSignal } from './priceActionPlaybook2026Engine';
 import { marketTraps, ChopAnalysis, TrapEvaluation } from './marketTrapsAndChopEngine';
 import { timingEngine, TimingEvaluation, MovePhase } from './timingAndAntiChaseEngine';
-import { reversalPlaybook, ReversalSignal } from './reversalAndZigzagPlaybookEngine';
 
 export class DeltaAutoTraderEngine {
   private stateFilePath: string;
@@ -794,19 +793,6 @@ export class DeltaAutoTraderEngine {
         candleTriggerTag = ` + PA ${paVerdict.setupType}`;
       }
 
-      // Reversal / Zigzag pattern confirmation
-      try {
-        const reversalSig = reversalPlaybook.evaluateSymbolReversal(cleanSym, closedCandles15m, atr15m);
-        if (reversalSig && reversalSig.confidenceScore >= 70) {
-          if (reversalSig.side !== mathSide) {
-            console.log(`🛡️ [CONFLUENCE CONFLICT] ${cleanSym} trade blocked: Reversal candle (${reversalSig.side} ${reversalSig.setupType}) opposes Quant Math (${mathSide}).`);
-            return null;
-          }
-          hasCandleConfirmation = true;
-          candleTriggerTag += ` + Reversal ${reversalSig.setupType}`;
-        }
-      } catch (e) {}
-
       // Symmetric Trap Protection: Do NOT SELL into Support Floor or BUY into Resistance Ceiling
       const isBlockedByFloor = mathSide === 'SELL' && (
         mathVerdict.isAtSupport ||
@@ -920,7 +906,6 @@ export class DeltaAutoTraderEngine {
           cand.strategyName.includes('BREAKOUT') ||
           cand.strategyName.includes('TREND_PULLBACK') ||
           cand.strategyName.includes('Breakout') ||
-          cand.strategyName.includes('Reversal & Zigzag') ||
           cand.strategyName.includes('REJECTION_PIN_BAR') ||
           cand.strategyName.includes('LIQUIDITY_SWEEP') ||
           cand.strategyName.includes('ENGULFING_AT_LEVEL') ||
@@ -942,11 +927,6 @@ export class DeltaAutoTraderEngine {
     // Filters out Fakeouts, Stop Hunts, Crowded Squeezes, Falling Knives, and Over-Tested Levels
     // -------------------------------------------------------------
     const safeCandidates = eligibleCandidates.filter(cand => {
-      // Reversal & Zigzag Playbook signals are already validated anti-trap exhaustion setups
-      if (cand.strategyName.includes('Reversal & Zigzag')) {
-        return true;
-      }
-
       // Pass the actual broken structural swing level rather than entryPrice (which was lastBar.close)
       const isBreakout = cand.strategyName.includes('BREAKOUT') || cand.strategyName.includes('Breakout');
       let structuralLevel = (paVerdict && paVerdict.side === cand.side) ? paVerdict.keyLevelPrice : undefined;
@@ -995,18 +975,13 @@ export class DeltaAutoTraderEngine {
     // Fix 3: Pullback Only in Mid Phase (runATR in [2.0, 3.5])
     // -------------------------------------------------------------
     const timingSafeCandidates = safeCandidates.filter(cand => {
-      // Reversal & Zigzag Playbook signals manage their own dropATR guard and structural levels
-      if (cand.strategyName.includes('Reversal & Zigzag')) {
-        return true;
-      }
-
       // Harmonize Timing Gate with Price Action Setups:
       if (
+        cand.strategyName.includes('Strict Math & Indicator Confluence') ||
         cand.strategyName.includes('Price Action Playbook') ||
         cand.strategyName.includes('Playbook 2026') ||
         cand.strategyName.includes('Quant Math') ||
         cand.strategyName.includes('Dedicated Indicator') ||
-        cand.strategyName.includes('Reversal') ||
         cand.strategyName.includes('TREND_PULLBACK') ||
         cand.strategyName.includes('REJECTION_PIN_BAR') ||
         cand.strategyName.includes('ENGULFING_AT_LEVEL') ||
@@ -2394,12 +2369,6 @@ export class DeltaAutoTraderEngine {
     this.symbolLastTradeTime.set(cleanSym, Date.now());
     this.symbolLastTradeTime.set(pos.symbol, Date.now());
 
-    // Record trade outcome in Reversal & Zigzag State Machine (signal.pdf Section 7 & 8)
-    reversalPlaybook.recordTradeOutcome(
-      cleanSym,
-      realizedPnlUSD > 0,
-      exitReason === 'TARGET_HIT' ? 'TP' : (exitReason === 'STOP_LOSS_HIT' ? 'SL' : 'TIME')
-    );
     // Record direction memory for Anti-Whipsaw check (User Mandate: "same buy buy sell htaa doo same coin pee wo wala")
     this.symbolLastTradeSide.set(cleanSym, {
       side: pos.side,
